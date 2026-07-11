@@ -1,0 +1,16 @@
+Background Color Explanation : Yellow Asia Session , Cyan UK Session, Black US session ( the chart is 15min, each bar)
+
+June 9 - Prior day PDVAH (green line and text) PD POC (Magenta Line and text ) are stacked together at the bottom at 29436-29413, very often when that happens there is a meaningful price reaction at that zone, aAs you can notice at opening the price was above the PDVAH then during the Asia sessin the stacked zones got tested 2 times and both of the time got successfully rejected and then the price gone higher and higher and stayed above wvap during Asia session and Uk Session.
+
+Also what I use to do prior to US Session, is to draw a Fixed Range VOlume profile and spot the High Volume Nodes, point of control for the UK and Asia current session.
+
+Then I noticed that during US session opening price has a reaction in that area ( the red edges box si interior green fill transpare)
+
+As you can notice on this entire day there was a really good move that I would have like my engine to pick out. 
+
+This play occurs very ofter during one month. So we need to keep track of play where the LINES are stacked and wait for a reaction in one of the direction depending on the position we are either under or above ( support resistance, to go SHort or LOng )
+
+I would like catch these two long moves:
+
+1) The bounce from the stacked lines- that is a 200p move
+2)THe US session opening where the price retess this HVN/POC or LVN and the the price continues Higher if the zone is a support or continues lower after the price descentent and its now resistance

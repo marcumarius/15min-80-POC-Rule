@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(find \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle\" -type f 2>/dev/null | head -200)",
+      "Read(//c/Users/marcu/Desktop/CLAUDE/15min 80% RUle/**)",
+      "Bash(diff \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/visual_layer_subgraphs.md\" \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/docs/visual_layer_subgraphs.md\" && echo \"IDENTICAL\")",
+      "Bash(rm \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/visual_layer_subgraphs.md\")",
+      "Bash(find /c/Users/marcu -iname \"PriorDayNY_valueArea_80pctRule.cpp\" 2>/dev/null)",
+      "Read(//c/Users/marcu/**)",
+      "Bash(mkdir -p \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/acsil/legacy\")",
+      "Bash(mv \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/PriorDayNY_ValueArea_80PctRule.cpp\" \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/acsil/legacy/PriorDayNY_ValueArea_80PctRule.cpp\")",
+      "Bash(find \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle\" -type f \\\\\\( -iname \"*.png\" -o -iname \"*.jpg\" -o -iname \"*.jpeg\" -o -iname \"*.gif\" -o -iname \"*.bmp\" -o -iname \"*.webp\" \\\\\\) 2>/dev/null)",
+      "Bash(find \"c:/Users/marcu/Desktop/CLAUDE\" -maxdepth 2 -newer \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/CLAUDE.md\" -type f 2>/dev/null)",
+      "Read(//c/Users/marcu/Desktop/CLAUDE/**)",
+      "Bash(find \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/Interesting observations\" -type f 2>/dev/null)",
+      "Read(//c/Users/marcu/Desktop/CLAUDE/15min 80% RUle/Interesting observations/**)",
+      "Bash(cd \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/Interesting observations\" && ls -la)",
+      "Bash(find \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle\" -iname \"*test*\" -o -iname \"*.scid\" -o -iname \"*.csv\" 2>/dev/null | grep -v node_modules)",
+      "Bash(python3 -c ' *)",
+      "Bash(python3 -m pip install tzdata)",
+      "Bash(python3 -m pip install -r requirements.txt)",
+      "Bash(cd \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle\" && ls PriorDayNY_ValueArea_80PctRule.cpp 2>/dev/null && echo \"still at root\" || echo \"already moved\")",
+      "Read(//c/Users/marcu/Desktop/CLAUDE/15min 80% RUle/acsil/**)",
+      "Bash(python3 -c \"import pytest, yaml; print\\('pytest', pytest.__version__, 'yaml OK'\\)\")",
+      "Bash(python3 -m pytest tests/ -v)",
+      "Bash(grep -n \"Phase 1 — Foundation Engine\" -A 3 \"c:/Users/marcu/Desktop/CLAUDE/15min 80% RUle/CLAUDE.md\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\marcu\\Desktop\\CLAUDE\\15min 80% RUle"
+    ]
+  }
+}

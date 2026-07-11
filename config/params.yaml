@@ -1,0 +1,195 @@
+# params.yaml — SINGLE SOURCE OF TRUTH for all strategy parameters.
+#
+# Rules (see CLAUDE.md §6):
+#   - No magic numbers anywhere in logic. Every constant lives here.
+#   - Each knob has: default (value), range (min/max or options), and rationale.
+#   - ACSIL inputs mirror these names/defaults so research and live stay in lockstep.
+#   - Changing a default requires a Decision Log entry.
+#
+# Units: prices in index points (MNQ/NQ), times in US Eastern (ET), distances in points
+# unless suffixed _atr (multiples of daily ATR).
+
+meta:
+  instrument: MNQ            # MNQ | NQ | MES
+  point_value: 2.0           # $/point (MNQ). NQ=20, MES=5
+  tick_size: 0.25
+  timezone: America/New_York # all session logic in ET; handle DST
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STRUCTURAL  (context: where price is relative to auction references)
+# ─────────────────────────────────────────────────────────────────────────────
+structural:
+  va_percent:
+    default: 0.70            # value-area coverage
+    range: [0.60, 0.80]
+    rationale: standard 70% VA; edges (VAH/VAL) define the 80%-rule zone
+  session_start:
+    default: "09:30"         # RTH open (ET)
+    rationale: US regular trading hours open
+  session_end:
+    default: "16:00"
+    rationale: RTH close
+  uk_session_start:
+    default: "03:00"
+    rationale: London/pre-NY session window, for UK-session FOLLOW reads
+  uk_session_end:
+    default: "09:30"
+    rationale: London session ends at the US RTH open
+  asia_session_start:
+    default: "18:00"
+    rationale: Asia session opens at the futures reopen (wraps midnight ET)
+  asia_session_end:
+    default: "03:00"
+    rationale: Asia session ends at the UK session open
+  ib_minutes:
+    default: 60
+    range: [30, 90]
+    rationale: initial balance duration; CONTEXT + target only, never a trigger
+  vwap_reset:
+    default: "18:00"         # daily VWAP anchor (CME reopen, ET)
+    rationale: anchor daily VWAP to the futures session open
+  vwap_bands:
+    default: [1.0, 2.0]      # ± standard deviations plotted
+    rationale: mean-reversion / extension context
+  overnight_vp_enable:
+    default: false            # flag-only (D-010, Provisional) until backtested
+    rationale: >
+      builds a Fixed-Range Volume Profile over the combined Asia+UK session and exposes its
+      HVN/POC/LVN as structural levels for the US-open window (D-010). n=1 evidence; do not
+      hard-enable until re-tested with real sample size.
+  level_stack_tol_ticks:
+    default: 6                # PD POC-to-nearest-VA-edge distance considered "stacked"
+    range: [2, 20]
+    rationale: >
+      flags a lopsided value area (POC near VAH/VAL rather than centered) as a boosted-
+      conviction REV zone (D-010). Flag-only; feeds confluence, never a standalone trigger.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ORDER-FLOW / FOOTPRINT  (triggers: when/whether an auction event confirms action)
+# These REPLACE the old time-based triggers (see Decision D-007).
+# ─────────────────────────────────────────────────────────────────────────────
+order_flow:
+  # --- Delta / CVD divergence ---
+  delta_div_lookback:
+    default: 5              # swings/bars compared for price-vs-delta divergence
+    range: [3, 12]
+    rationale: window to detect price new-extreme without delta/CVD confirmation
+  cvd_reset:
+    default: "18:00"
+    rationale: cumulative-delta anchor matches VWAP session anchor
+
+  # --- Absorption (passive soaking up aggression; price stalls) ---
+  absorption_vol_z:
+    default: 2.0            # z-score of resting/traded volume vs local norm
+    range: [1.5, 3.5]
+    rationale: how anomalous the absorbed volume must be to count
+  absorption_price_stall_ticks:
+    default: 3              # max price travel that still qualifies as absorption
+    range: [1, 6]
+    rationale: heavy volume + minimal travel = passive defense of a level
+
+  # --- Exhaustion (climactic initiative that fails to extend) ---
+  exhaustion_climax_z:
+    default: 2.5            # z-score of climactic volume/delta
+    range: [1.5, 4.0]
+    rationale: identifies blow-off before failure
+
+  # --- Footprint imbalances (aggressive initiative) ---
+  imbalance_ratio:
+    default: 3.0            # diagonal bid vs ask ratio for a single imbalance
+    range: [2.0, 5.0]
+    rationale: institutional initiative leaves diagonal imbalances
+  stacked_imbalance_min:
+    default: 3             # consecutive imbalances to confirm initiative
+    range: [2, 6]
+    rationale: a stack (not a single print) confirms directional conviction
+
+  # --- Acceptance (REPLACES "N consecutive closes") ---
+  acceptance:
+    method: trade_and_rest  # trade_and_rest | tpo_time | volume_node
+    trade_and_rest_min_volume_z:
+      default: 1.5
+      rationale: price must TRADE and BUILD volume beyond a level, not just wick
+    rationale: acceptance is an auction fact (volume built), not a clock fact
+
+# ─────────────────────────────────────────────────────────────────────────────
+# FILTERS  (see Decisions D-001, D-003, D-004)
+# ─────────────────────────────────────────────────────────────────────────────
+filters:
+  no_mans_land_atr:
+    default: 0.5           # max distance to nearest structure, in ATR
+    range: [0.3, 1.0]
+    rationale: >
+      signals >0.5xATR from any structural level underperform (D-004). 0.5 removes
+      ~45% of signals; consider 0.6-0.7 to keep more volume. Applied hard for REV,
+      flag-only for FADE/FOLLOW until confirmed.
+  rev_us_only:
+    default: true
+    rationale: REV is an RTH-only edge (D-001)
+  conflict_veto:
+    default: true
+    rationale: opposing same-session reads → stand aside (D-003); biggest noise filter
+  atr_period:
+    default: 14
+    rationale: daily-range ATR used for ATR-normalized distances/tolerances
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RISK & MANAGEMENT  (see Decision D-006)
+# ─────────────────────────────────────────────────────────────────────────────
+management:
+  risk_per_trade:
+    default: 0.01          # fixed-fractional (1% of account)
+    range: [0.005, 0.02]
+    rationale: fixed-fractional sizing; compounding figures are a mirage, plan on fixed
+  min_stop_pts:
+    default: 15            # MNQ points; sizing sanity floor
+    range: [10, 30]
+    rationale: prevents absurd size on tiny stops; from cost-modeled backtests
+  tgt1_R:
+    default: 1.5           # first scale target (R multiple)
+    range: [1.0, 2.5]
+    rationale: 1.5R hybrid best balances win% vs drawdown (D-006)
+  scale_out_fraction:
+    default: 0.5           # take 50% at tgt1, trail the rest
+    rationale: banks a winner, lets a runner work from breakeven
+  breakeven_after_tgt1:
+    default: true
+    rationale: caps runner risk to zero after first target
+  runner_trail:
+    method: swing          # swing | atr
+    atr_floor: 0.10        # ATR multiple floor for trailing stop
+    rationale: structural/swing trail with an ATR floor to avoid noise stops
+  max_contracts:
+    default: 50
+    rationale: hard sanity cap regardless of sizing math
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PROP-ACCOUNT RISK  (trailing-drawdown discipline)
+# ─────────────────────────────────────────────────────────────────────────────
+prop:
+  account_size:
+    default: 50000
+    rationale: eval account nominal; set per firm
+  trailing_drawdown:
+    default: 2500
+    rationale: intraday trailing DD limit; simulate never-breach in Phase 6
+  daily_loss_limit:
+    default: 1000
+    rationale: stop trading for the day if hit
+  rationale: >
+    Apex/Topstep/TakeProfit-style trailing DD. Phase 6 Monte Carlo must show blow-up
+    risk within tolerance at the intended contract schedule.
+
+# ─────────────────────────────────────────────────────────────────────────────
+# COSTS  (mandatory in every economic result — Decision D-008)
+# ─────────────────────────────────────────────────────────────────────────────
+costs:
+  entry_slippage_ticks:
+    default: 1
+    rationale: pay up ~1 tick on entry
+  stop_slippage_ticks:
+    default: 3
+    rationale: stops fill worse in fast moves
+  commission_round_trip:
+    default: 1.5           # $/contract round trip
+    rationale: broker+exchange+NFA; adjust to actual
