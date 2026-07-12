@@ -231,6 +231,116 @@ static void LogSig(const char* fn, const SCDateTime& dt, const char* msg)
              fclose(f); }
 }
 
+struct SigOut { int dir; int idx; bool isFollow; float price; float level; SCString why; };
+
+// Runs the FOLLOW/FADE state machine over ONE day's RTH bars [rthStart,
+// rthEnd] against a frozen prior-day (vah,val). Mirrors signals/engine.py's
+// generate_signals() exactly. Callable per-day so historical days can be
+// drawn/inspected, not just the live/current one.
+static void ComputeDaySignals(SCStudyInterfaceRef sc, int rthStart, int rthEnd,
+                              float vah, float val, int lookback, int divLookback,
+                              float absorbZ, float absorbStall, float exhaustZ, float acceptZ,
+                              std::vector<SigOut>& out)
+{
+    if (rthEnd < rthStart || vah <= 0 || val <= 0 || sc.TickSize <= 0) return;
+    const int n = rthEnd - rthStart + 1;
+    std::vector<float> absDelta(n), deltaSigned(n), cvd(n), volArr(n), hiArr(n), loArr(n), clArr(n);
+    float running = 0.0f;
+    for (int k = 0; k < n; ++k)
+    {
+        int idx = rthStart + k;
+        float delta = sc.AskVolume[idx] - sc.BidVolume[idx];
+        deltaSigned[k] = delta; absDelta[k] = delta < 0 ? -delta : delta;
+        running += delta; cvd[k] = running;
+        volArr[k] = sc.Volume[idx];
+        hiArr[k] = sc.High[idx]; loArr[k] = sc.Low[idx]; clArr[k] = sc.Close[idx];
+    }
+
+    // first-qualifying-bar acceptance (trade_and_rest) -- equivalent to
+    // Python's growing-slice re-scan (features/acceptance.py), since only
+    // the FIRST qualifying bar ever matters.
+    int firstAcceptUp = -1, firstAcceptDn = -1;
+    for (int k = 0; k < n; ++k)
+    {
+        if (firstAcceptUp < 0 && loArr[k] > vah && RollingZ(volArr, k, lookback) >= acceptZ) firstAcceptUp = k;
+        if (firstAcceptDn < 0 && hiArr[k] < val && RollingZ(volArr, k, lookback) >= acceptZ) firstAcceptDn = k;
+    }
+
+    int followState[2] = { 0, 0 };   // [0]=long(dir+1) [1]=short(dir-1); 0=idle 1=armed 2=fired
+    int fadeState[2] = { 0, 0 };      // fadeDir index: [0]=fadeDir+1 [1]=fadeDir-1
+    int excursionExtIdx[2] = { -1, -1 };
+
+    for (int k = 0; k < n; ++k)
+    {
+        for (int dSel = 0; dSel < 2; ++dSel)
+        {
+            const int direction = dSel == 0 ? 1 : -1;
+            const float edge = dSel == 0 ? vah : val;
+            const int fadeDirSel = dSel == 0 ? 1 : 0;
+            const bool fullyBeyond = direction > 0 ? (loArr[k] > edge) : (hiArr[k] < edge);
+            if (fullyBeyond)
+            {
+                if (followState[dSel] == 0) followState[dSel] = 1;
+                if (fadeState[fadeDirSel] == 0) fadeState[fadeDirSel] = 1;
+                int prevExt = excursionExtIdx[fadeDirSel];
+                bool takeExt = prevExt < 0;
+                if (!takeExt) { if (direction > 0 && hiArr[k] > hiArr[prevExt]) takeExt = true;
+                                if (direction < 0 && loArr[k] < loArr[prevExt]) takeExt = true; }
+                if (takeExt) excursionExtIdx[fadeDirSel] = k;
+            }
+
+            // ---- FOLLOW: acceptance beyond the edge, no absorption against ----
+            if (followState[dSel] == 1)
+            {
+                int firstAccept = direction > 0 ? firstAcceptUp : firstAcceptDn;
+                if (firstAccept == k)
+                {
+                    int a = AbsorptionAt(absDelta, deltaSigned, hiArr, loArr, k, lookback, absorbZ, absorbStall, sc.TickSize);
+                    bool against = (direction > 0 && a == -1) || (direction < 0 && a == 1);
+                    if (!against)
+                    {
+                        SigOut s; s.dir = direction; s.idx = k; s.isFollow = true;
+                        s.price = clArr[k]; s.level = edge; s.why = "Acceptance";
+                        out.push_back(s);
+                        followState[dSel] = 2;
+                    }
+                }
+            }
+
+            // ---- FADE: re-entry + evidence the excursion FAILED ----
+            if (fadeState[fadeDirSel] == 1)
+            {
+                bool backInside = clArr[k] > val && clArr[k] < vah;
+                if (backInside)
+                {
+                    const int fadeDirActual = fadeDirSel == 0 ? 1 : -1;
+                    int extIdx = excursionExtIdx[fadeDirSel];
+                    bool hasFailure = false; SCString why;
+                    if (extIdx >= 0)
+                    {
+                        for (int j = extIdx; j <= k; ++j)
+                        {
+                            int a = AbsorptionAt(absDelta, deltaSigned, hiArr, loArr, j, lookback, absorbZ, absorbStall, sc.TickSize);
+                            if ((fadeDirActual < 0 && a == -1) || (fadeDirActual > 0 && a == 1)) { hasFailure = true; why.Append("Absorption "); }
+                            bool bear, bull; DivergenceAt(hiArr, loArr, cvd, j, divLookback, bear, bull);
+                            if ((fadeDirActual < 0 && bear) || (fadeDirActual > 0 && bull)) { hasFailure = true; why.Append("Divergence "); }
+                            int x = ExhaustionConfirmedAt(absDelta, hiArr, loArr, j, lookback, exhaustZ);
+                            if ((fadeDirActual < 0 && x == -1) || (fadeDirActual > 0 && x == 1)) { hasFailure = true; why.Append("Exhaustion "); }
+                        }
+                    }
+                    if (hasFailure)
+                    {
+                        SigOut s; s.dir = fadeDirActual; s.idx = k; s.isFollow = false;
+                        s.price = clArr[k]; s.level = edge; s.why = why;
+                        out.push_back(s);
+                        fadeState[fadeDirSel] = 2;
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Study
 // ---------------------------------------------------------------------------
@@ -527,6 +637,80 @@ SCSFExport scsf_OrderFlowAuctionStudy(SCStudyInterfaceRef sc)
         }
     }
 
+    // ---- Pass 2c: order-flow FOLLOW/FADE signal engine, ALL drawn days ----
+    // Not just the live/currently-forming day: markers are drawn for every
+    // historical day in the daysToDraw window too, so signals are visible
+    // when scrolling back or reviewing after hours -- only the LIVE gate
+    // (lastInProgress) used previously meant NOTHING showed outside active
+    // RTH hours, which is what you'd hit testing this after the close.
+    // UNGATED (see file header): mirrors signals/engine.py exactly. Logging
+    // to file/alert-log is still restricted to the MOST RECENT day only
+    // (persistent-int guard) so history isn't re-logged every recalc.
+    std::vector<SigOut> liveDaySignals;
+    if (In_ShowSignals.GetYesNo())
+    {
+        const int lookback = In_FeatureLookback.GetInt();
+        const int divLookback = In_DeltaDivLookback.GetInt();
+        const float absorbZ = In_AbsorptionVolZ.GetFloat();
+        const float absorbStall = In_AbsorptionStallTicks.GetFloat();
+        const float exhaustZ = In_ExhaustionClimaxZ.GetFloat();
+        const float acceptZ = In_AcceptMinVolZ.GetFloat();
+        const int startI = firstDraw > 0 ? firstDraw : 1;
+
+        for (int i = startI; i < total; ++i)
+        {
+            if (i < 1) continue;
+            const DayProfile& ref = days[i - 1];
+            const DayProfile& cur = days[i];
+            if (!cur.RTHValid || ref.VAH <= 0 || ref.VAL <= 0) continue;
+
+            int rthStart = cur.RTHStartIdx;
+            int rthEnd = cur.RTHEndIdx;
+            if (i == total - 1)
+            {
+                int lc = sc.ArraySize - 1;
+                if (lc > 0 && sc.GetBarHasClosedStatus(lc) != BHCS_BAR_HAS_CLOSED) lc--;
+                if (lc < rthEnd) rthEnd = lc;
+            }
+            if (rthEnd < rthStart) continue;
+
+            std::vector<SigOut> daySignals;
+            ComputeDaySignals(sc, rthStart, rthEnd, ref.VAH, ref.VAL, lookback, divLookback,
+                              absorbZ, absorbStall, exhaustZ, acceptZ, daySignals);
+
+            for (size_t si = 0; si < daySignals.size(); ++si)
+            {
+                const SigOut& s = daySignals[si];
+                SCDateTime sTs = sc.BaseDateTimeIn[rthStart + s.idx];
+                s_UseTool m; m.Clear(); m.ChartNumber = sc.ChartNumber; m.DrawingType = DRAWING_TEXT;
+                m.LineNumber = 900000 + cur.DayKey * 100 + (int)si;
+                m.BeginDateTime = sTs; m.BeginValue = s.price;
+                m.Color = s.dir > 0 ? In_LongSignalColor.GetColor() : In_ShortSignalColor.GetColor();
+                m.FontSize = 11; m.FontBold = 1; m.AddMethod = UTAM_ADD_OR_ADJUST;
+                m.Text.Format("%s %s\n%.2f", s.isFollow ? "FOLLOW" : "FADE", s.dir > 0 ? "LONG ^" : "SHORT v", s.price);
+                sc.UseTool(m);
+            }
+
+            if (i == total - 1)
+            {
+                liveDaySignals = daySignals;
+                int& loggedDayKey = sc.GetPersistentInt(20);
+                int& loggedCount = sc.GetPersistentInt(21);
+                if (loggedDayKey != cur.DayKey) { loggedDayKey = cur.DayKey; loggedCount = 0; }
+                for (size_t si = (size_t)loggedCount; si < daySignals.size(); ++si)
+                {
+                    const SigOut& s = daySignals[si];
+                    SCDateTime sTs = sc.BaseDateTimeIn[rthStart + s.idx];
+                    SCString msg; msg.Format("%s %s @ %.2f (level %.2f) | %s",
+                        s.isFollow ? "FOLLOW" : "FADE", s.dir > 0 ? "LONG" : "SHORT", s.price, s.level, s.why.GetChars());
+                    if (In_LogEnable.GetYesNo()) LogSig(In_LogFile.GetString(), sTs, msg.GetChars());
+                    sc.AddMessageToLog(msg, 1);
+                }
+                loggedCount = (int)daySignals.size();
+            }
+        }
+    }
+
     // ---- Pass 3: no-man's-land readout + frozen structural HUD -----------
     if (In_ShowHUD.GetYesNo() && curPDidx >= 0)
     {
@@ -560,162 +744,19 @@ SCSFExport scsf_OrderFlowAuctionStudy(SCStudyInterfaceRef sc)
             nearDn < 1e30f ? nearDn : 0.0f, noMansDn ? " [NO-MANS-LAND]" : "");
         hud.Append(line.GetChars());
 
-        // ---- Pass 4: order-flow FOLLOW/FADE signal engine (live day only) --
-        // UNGATED (see file header): mirrors signals/engine.py exactly. Runs
-        // once per recalc over today's RTH bars so far; only NEWLY-fired
-        // signals get logged/alerted (persistent-int guard keyed by day).
+        // ---- Order-flow signal summary (computed for ALL days in Pass 2c
+        // above; markers already drawn there for every visible day, not
+        // just live). This just summarizes the most recent day.
         hud.Append("===== ORDER-FLOW SIGNALS (ungated, validated core) =====\n");
-        if (In_ShowSignals.GetYesNo() && ref.Valid && lastInProgress && days[total - 1].RTHValid)
+        if (!In_ShowSignals.GetYesNo()) hud.Append("(signal display disabled)\n");
+        else if (liveDaySignals.empty()) hud.Append("(none yet on the most recent day)\n");
+        else
         {
-            const DayProfile& liveDay = days[total - 1];
-            int rthStart = liveDay.RTHStartIdx;
-            int rthEnd = lastClosed;
-            if (rthEnd >= rthStart && ref.VAH > 0 && ref.VAL > 0 && sc.TickSize > 0)
-            {
-                const int n = rthEnd - rthStart + 1;
-                std::vector<float> absDelta(n), deltaSigned(n), cvd(n), volArr(n), hiArr(n), loArr(n), clArr(n);
-                float running = 0.0f;
-                for (int k = 0; k < n; ++k)
-                {
-                    int idx = rthStart + k;
-                    float delta = sc.AskVolume[idx] - sc.BidVolume[idx];
-                    deltaSigned[k] = delta; absDelta[k] = delta < 0 ? -delta : delta;
-                    running += delta; cvd[k] = running;
-                    volArr[k] = sc.Volume[idx];
-                    hiArr[k] = sc.High[idx]; loArr[k] = sc.Low[idx]; clArr[k] = sc.Close[idx];
-                }
-
-                const int lookback = In_FeatureLookback.GetInt();
-                const int divLookback = In_DeltaDivLookback.GetInt();
-                const float absorbZ = In_AbsorptionVolZ.GetFloat();
-                const float absorbStall = In_AbsorptionStallTicks.GetFloat();
-                const float exhaustZ = In_ExhaustionClimaxZ.GetFloat();
-                const float acceptZ = In_AcceptMinVolZ.GetFloat();
-
-                // first-qualifying-bar acceptance (trade_and_rest), precomputed
-                // once -- equivalent to Python's growing-slice re-scan (features/
-                // acceptance.py), since only the FIRST qualifying bar ever matters.
-                int firstAcceptUp = -1, firstAcceptDn = -1;
-                for (int k = 0; k < n; ++k)
-                {
-                    if (firstAcceptUp < 0 && loArr[k] > ref.VAH && RollingZ(volArr, k, lookback) >= acceptZ) firstAcceptUp = k;
-                    if (firstAcceptDn < 0 && hiArr[k] < ref.VAL && RollingZ(volArr, k, lookback) >= acceptZ) firstAcceptDn = k;
-                }
-
-                struct SigOut { int dir; int idx; bool isFollow; float price; float level; SCString why; };
-                std::vector<SigOut> todaySignals;
-                int followState[2] = { 0, 0 };   // [0]=long(dir+1) [1]=short(dir-1); 0=idle 1=armed 2=fired
-                int fadeState[2] = { 0, 0 };      // fadeDir index: [0]=fadeDir+1 [1]=fadeDir-1
-                int excursionExtIdx[2] = { -1, -1 };
-
-                for (int k = 0; k < n; ++k)
-                {
-                    for (int dSel = 0; dSel < 2; ++dSel)
-                    {
-                        const int direction = dSel == 0 ? 1 : -1;
-                        const float edge = dSel == 0 ? ref.VAH : ref.VAL;
-                        const int fadeDirSel = dSel == 0 ? 1 : 0;
-                        const bool fullyBeyond = direction > 0 ? (loArr[k] > edge) : (hiArr[k] < edge);
-                        if (fullyBeyond)
-                        {
-                            if (followState[dSel] == 0) followState[dSel] = 1;
-                            if (fadeState[fadeDirSel] == 0) fadeState[fadeDirSel] = 1;
-                            int prevExt = excursionExtIdx[fadeDirSel];
-                            bool takeExt = prevExt < 0;
-                            if (!takeExt) { if (direction > 0 && hiArr[k] > hiArr[prevExt]) takeExt = true;
-                                            if (direction < 0 && loArr[k] < loArr[prevExt]) takeExt = true; }
-                            if (takeExt) excursionExtIdx[fadeDirSel] = k;
-                        }
-
-                        // ---- FOLLOW: acceptance beyond the edge, no absorption against ----
-                        if (followState[dSel] == 1)
-                        {
-                            int firstAccept = direction > 0 ? firstAcceptUp : firstAcceptDn;
-                            if (firstAccept == k)
-                            {
-                                int a = AbsorptionAt(absDelta, deltaSigned, hiArr, loArr, k, lookback, absorbZ, absorbStall, sc.TickSize);
-                                bool against = (direction > 0 && a == -1) || (direction < 0 && a == 1);
-                                if (!against)
-                                {
-                                    SigOut s; s.dir = direction; s.idx = k; s.isFollow = true;
-                                    s.price = clArr[k]; s.level = edge; s.why = "Acceptance";
-                                    todaySignals.push_back(s);
-                                    followState[dSel] = 2;
-                                }
-                            }
-                        }
-
-                        // ---- FADE: re-entry + evidence the excursion FAILED ----
-                        if (fadeState[fadeDirSel] == 1)
-                        {
-                            bool backInside = clArr[k] > ref.VAL && clArr[k] < ref.VAH;
-                            if (backInside)
-                            {
-                                const int fadeDirActual = fadeDirSel == 0 ? 1 : -1;
-                                int extIdx = excursionExtIdx[fadeDirSel];
-                                bool hasFailure = false; SCString why;
-                                if (extIdx >= 0)
-                                {
-                                    for (int j = extIdx; j <= k; ++j)
-                                    {
-                                        int a = AbsorptionAt(absDelta, deltaSigned, hiArr, loArr, j, lookback, absorbZ, absorbStall, sc.TickSize);
-                                        if ((fadeDirActual < 0 && a == -1) || (fadeDirActual > 0 && a == 1)) { hasFailure = true; why.Append("Absorption "); }
-                                        bool bear, bull; DivergenceAt(hiArr, loArr, cvd, j, divLookback, bear, bull);
-                                        if ((fadeDirActual < 0 && bear) || (fadeDirActual > 0 && bull)) { hasFailure = true; why.Append("Divergence "); }
-                                        int x = ExhaustionConfirmedAt(absDelta, hiArr, loArr, j, lookback, exhaustZ);
-                                        if ((fadeDirActual < 0 && x == -1) || (fadeDirActual > 0 && x == 1)) { hasFailure = true; why.Append("Exhaustion "); }
-                                    }
-                                }
-                                if (hasFailure)
-                                {
-                                    SigOut s; s.dir = fadeDirActual; s.idx = k; s.isFollow = false;
-                                    s.price = clArr[k]; s.level = edge; s.why = why;
-                                    todaySignals.push_back(s);
-                                    fadeState[fadeDirSel] = 2;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // draw markers + log/alert only NEWLY-fired signals this day
-                int& loggedDayKey = sc.GetPersistentInt(20);
-                int& loggedCount = sc.GetPersistentInt(21);
-                if (loggedDayKey != liveDay.DayKey) { loggedDayKey = liveDay.DayKey; loggedCount = 0; }
-
-                for (size_t si = 0; si < todaySignals.size(); ++si)
-                {
-                    const SigOut& s = todaySignals[si];
-                    SCDateTime sTs = sc.BaseDateTimeIn[rthStart + s.idx];
-                    s_UseTool m; m.Clear(); m.ChartNumber = sc.ChartNumber; m.DrawingType = DRAWING_TEXT;
-                    m.LineNumber = 900000 + liveDay.DayKey * 100 + (int)si;
-                    m.BeginDateTime = sTs; m.BeginValue = s.price;
-                    m.Color = s.dir > 0 ? In_LongSignalColor.GetColor() : In_ShortSignalColor.GetColor();
-                    m.FontSize = 11; m.FontBold = 1; m.AddMethod = UTAM_ADD_OR_ADJUST;
-                    m.Text.Format("%s %s\n%.2f", s.isFollow ? "FOLLOW" : "FADE", s.dir > 0 ? "LONG ^" : "SHORT v", s.price);
-                    sc.UseTool(m);
-
-                    if ((int)si >= loggedCount)
-                    {
-                        SCString msg; msg.Format("%s %s @ %.2f (level %.2f) | %s",
-                            s.isFollow ? "FOLLOW" : "FADE", s.dir > 0 ? "LONG" : "SHORT", s.price, s.level, s.why.GetChars());
-                        if (In_LogEnable.GetYesNo()) LogSig(In_LogFile.GetString(), sTs, msg.GetChars());
-                        sc.AddMessageToLog(msg, 1);
-                    }
-                }
-                loggedCount = (int)todaySignals.size();
-
-                if (todaySignals.empty()) hud.Append("(none yet today)\n");
-                else
-                {
-                    const SigOut& last = todaySignals.back();
-                    line.Format("%d today | last: %s %s @ %.2f\n", (int)todaySignals.size(),
-                        last.isFollow ? "FOLLOW" : "FADE", last.dir > 0 ? "LONG" : "SHORT", last.price);
-                    hud.Append(line.GetChars());
-                }
-            }
+            const SigOut& last = liveDaySignals.back();
+            line.Format("%d on most recent day | last: %s %s @ %.2f\n", (int)liveDaySignals.size(),
+                last.isFollow ? "FOLLOW" : "FADE", last.dir > 0 ? "LONG" : "SHORT", last.price);
+            hud.Append(line.GetChars());
         }
-        else hud.Append("(waiting for live RTH day / valid PD VA)\n");
         hud.Append("-- D-013 gates/veto NOT applied (failed weak-OOS); MOMO not ported --");
 
         Sub_HUD.PrimaryColor = In_HUDColor.GetColor(); Sub_HUD.LineWidth = In_HUDFontSize.GetInt();
