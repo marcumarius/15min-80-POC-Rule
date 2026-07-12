@@ -323,13 +323,19 @@ cross-check against the live ACSIL study to confirm the port is faithful.
 counts match the research engine within tolerance; no unexplained divergence.
 
 ### Phase 8 — Production Release
-**Status: Planned, structural slice started early.** `acsil/OrderFlowAuctionStudy.cpp` ports
-the validated Phase 1 structural layer (PD VAH/POC/VAL with the D-011 window correction, IB,
-weekly, no-man's-land) — no signal logic yet, since FADE/FOLLOW/REV still need Phase 2/3
-Python validation first (dev rule #2). Not yet built/tested in Sierra Chart (no ACSIL
-compiler in the research environment) — needs a build pass and compile-error fixes before
-it's real. Full Phase 8 scope (signals, alerts, live conviction HUD, logging) stays gated
-on Phases 2-7.
+**Status: Planned, structural + ungated signal slice started early.** `acsil/
+OrderFlowAuctionStudy.cpp` ports (1) the validated Phase 1 structural layer (PD VAH/POC/VAL
+with the D-011 window correction, IB, weekly, no-man's-land) — confirmed compiling/running
+by the user; and (2) the UNGATED FOLLOW/FADE order-flow signal engine (2026-07-12) — the
+"trustworthy core" validated in Python across three regime periods (+0.130R/trade, n=256,
+FADE positive in all six period×bar cells). D-013 regime gates and MOMO are deliberately
+NOT ported (failed weak-OOS / lost head-to-head — see docs/decisions.md, docs/
+phase2_interim_report.md). Includes a pipe-delimited signal logger for forward reconciliation
+against the Python backtest (Phase 7) — the mechanism for the genuine OOS data every open
+question in the project now depends on. The signal-layer addition is NOT yet built/tested
+in Sierra Chart (no ACSIL compiler in the research environment; brace/paren balance checked
+programmatically only) — needs a build pass and compile-error fixes before it's real. Full
+Phase 8 scope (alerts, live conviction HUD, prop-risk logic) stays gated on Phases 5-7.
 **Objective:** deploy the validated logic live.
 **Deliverables:** the ACSIL study/DLL with only validated logic, HUD showing frozen structural
 read + live conviction, alerts/ntfy, a signal+decision logger, and a monitoring/journaling loop

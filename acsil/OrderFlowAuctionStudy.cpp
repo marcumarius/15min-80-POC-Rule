@@ -1,21 +1,39 @@
 // ============================================================================
 //  OrderFlowAuctionStudy.cpp
 //
-//  Sierra Chart custom study (ACSIL). Ground-up rebuild, Phase 1 slice ONLY.
+//  Sierra Chart custom study (ACSIL). Ground-up rebuild.
 //
-//  SCOPE (deliberate): structural context, NOT triggers. Per CLAUDE.md dev
-//  rule #2 ("a trigger is not written into ACSIL until it is validated in
-//  Python with costs, OOS, and a regime split"), this study draws:
-//    - Prior-day POC / VAH / VAL (true volume-at-price, projected onto the
-//      next trading day)
-//    - Initial Balance high/low
-//    - Weekly VPOC + prior-week high/low
-//    - A no-man's-land distance readout (D-004)
-//  It does NOT contain FADE/FOLLOW/REV signal logic, alerts, day-type
-//  scoring, or any of the legacy study's time-based triggers -- those are
-//  the entire reason for the rebuild (D-007) and belong in Python first
-//  (Phase 2/3), ported here only once validated. Do not add signal logic to
-//  this file without a decisions.md entry backing it.
+//  STRUCTURAL LAYER (Phase 1): Prior-day POC/VAH/VAL (true volume-at-price,
+//  projected onto the next trading day), Initial Balance, Weekly VPOC +
+//  prior-week high/low, no-man's-land distance readout (D-004).
+//
+//  ORDER-FLOW SIGNAL LAYER (Phase 2/3, added 2026-07-12): the UNGATED
+//  FOLLOW/FADE event engine only -- delta/CVD divergence, absorption,
+//  exhaustion, trade-and-rest acceptance -- mirroring signals/engine.py +
+//  features/{delta,absorption,exhaustion,acceptance}.py exactly. This is
+//  the "trustworthy core" validated in Python with costs across three
+//  regime periods (docs/phase2_interim_report.md, 2026-07-12): +0.130R/
+//  trade combined (n=256), FADE positive in all six period x bar-basis
+//  cells. Per CLAUDE.md dev rule #2, ONLY this validated slice is ported.
+//
+//  EXPLICITLY NOT PORTED (do not add without a decisions.md entry):
+//    - D-013 regime gates (open-drive/gap-holds/narrow-IB) and the live
+//      conflict veto (fusion/decision.py) -- measured in-sample only
+//      (+0.35-0.51R) and FAILED weak-OOS on unseen thin-contract periods
+//      (D-013 re-test note, docs/decisions.md): fusion was NEGATIVE
+//      (-0.057R) vs the ungated baseline (+0.017R) on data the rules never
+//      saw. Do not gate/veto signals in this file until a LIQUID unseen
+//      period (forward data) supports it.
+//    - MOMO pullback/retest engine (signals/momentum.py) -- lost to FOLLOW
+//      head-to-head combined (-0.074R vs +0.115R); regime-complementary but
+//      no working regime gate to select between them.
+//    - REV, day-type scoring, IVB, and all other legacy signal logic.
+//
+//  Includes a pipe-delimited signal+decision logger (ACSIL gotcha, CLAUDE.md
+//  6.8) so live-fired signals can be reconciled against the Python backtest
+//  (Phase 7) and accumulate genuine forward out-of-sample data -- the
+//  single most important open question left (every D-013/MOMO verdict above
+//  is in-sample or weak-OOS; only forward tracking settles it for real).
 //
 //  WINDOW CORRECTION (D-011, docs/decisions.md): the legacy study and its
 //  accompanying notes describe the prior-day value area as RTH-only
@@ -44,6 +62,9 @@
 #include "sierrachart.h"
 #include <map>
 #include <vector>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
 
 SCDLLName("OrderFlowAuctionStudy")
 
@@ -124,6 +145,93 @@ static int TradingDayKey(const SCDateTime& bdt, int dayBoundarySec)
 }
 
 // ---------------------------------------------------------------------------
+// Order-flow feature helpers (Phase 2/3, mirror features/*.py exactly --
+// see file header. All operate on 0-indexed vectors of TODAY's RTH bars
+// only; index k in these vectors corresponds to bar sc index rthStart+k.)
+// ---------------------------------------------------------------------------
+
+// Mirrors features/_stats.py::rolling_zscore -- z-score of v[idx] against
+// the trailing `lookback` values strictly BEFORE idx. 0.0 on insufficient
+// history or zero variance (never a false positive; callers gate on a
+// minimum).
+static float RollingZ(const std::vector<float>& v, int idx, int lookback)
+{
+    int start = idx - lookback;
+    if (start < 0 || lookback < 2) return 0.0f;
+    double sum = 0.0;
+    for (int k = start; k < idx; ++k) sum += v[k];
+    double mean = sum / lookback;
+    double sq = 0.0;
+    for (int k = start; k < idx; ++k) { double d = v[k] - mean; sq += d * d; }
+    double sd = sqrt(sq / lookback);
+    if (sd <= 0.0) return 0.0f;
+    return (float)((v[idx] - mean) / sd);
+}
+
+// Mirrors features/delta.py::detect_divergence for a single bar k: price
+// makes a new `lookback`-bar extreme while CVD does not confirm.
+static void DivergenceAt(const std::vector<float>& hi, const std::vector<float>& lo,
+                         const std::vector<float>& cvd, int k, int lookback,
+                         bool& bearish, bool& bullish)
+{
+    bearish = false; bullish = false;
+    if (k < lookback) return;
+    float wHi = -1e30f, wLo = 1e30f, wCvdHi = -1e30f, wCvdLo = 1e30f;
+    for (int j = k - lookback; j < k; ++j)
+    {
+        if (hi[j] > wHi) wHi = hi[j];
+        if (lo[j] < wLo) wLo = lo[j];
+        if (cvd[j] > wCvdHi) wCvdHi = cvd[j];
+        if (cvd[j] < wCvdLo) wCvdLo = cvd[j];
+    }
+    if (hi[k] > wHi && cvd[k] <= wCvdHi) bearish = true;
+    if (lo[k] < wLo && cvd[k] >= wCvdLo) bullish = true;
+}
+
+// Mirrors features/absorption.py::detect_absorption for a single bar k.
+// Returns -1 (bearish: heavy buying absorbed), +1 (bullish: heavy selling
+// absorbed), or 0 (none).
+static int AbsorptionAt(const std::vector<float>& absDelta, const std::vector<float>& deltaSigned,
+                        const std::vector<float>& hi, const std::vector<float>& lo,
+                        int k, int lookback, float volZ, float stallTicks, float tickSize)
+{
+    float z = RollingZ(absDelta, k, lookback);
+    if (z < volZ) return 0;
+    if ((hi[k] - lo[k]) > stallTicks * tickSize) return 0;
+    return deltaSigned[k] < 0 ? 1 : -1;
+}
+
+// Mirrors features/exhaustion.py::detect_exhaustion, evaluated per
+// confirm-bar k (climax is bar k-1, confirm_bars=1 fixed here to match the
+// validated default). Returns -1/+1/0.
+static int ExhaustionConfirmedAt(const std::vector<float>& absDelta, const std::vector<float>& hi,
+                                 const std::vector<float>& lo, int k, int lookback, float climaxZ)
+{
+    int c = k - 1;
+    if (c < lookback) return 0;
+    float z = RollingZ(absDelta, c, lookback);
+    if (z < climaxZ) return 0;
+    float wHi = -1e30f, wLo = 1e30f;
+    for (int j = c - lookback; j < c; ++j) { if (hi[j] > wHi) wHi = hi[j]; if (lo[j] < wLo) wLo = lo[j]; }
+    bool isUpClimax = hi[c] > wHi, isDnClimax = lo[c] < wLo;
+    if (isUpClimax && hi[k] <= hi[c]) return -1;
+    if (isDnClimax && lo[k] >= lo[c]) return 1;
+    return 0;
+}
+
+// Append a SIGNAL line to the log file (ACSIL gotcha, CLAUDE.md 6.8) --
+// pipe-delimited so Python can reconcile live-fired signals against the
+// backtest (Phase 7 replay-log cross-check).
+static void LogSig(const char* fn, const SCDateTime& dt, const char* msg)
+{
+    if (!fn || strlen(fn) < 2) return;
+    FILE* f = fopen(fn, "a");
+    if (f) { fprintf(f, "SIGNAL | %04d-%02d-%02d %02d:%02d:%02d | %s\n",
+             dt.GetYear(), dt.GetMonth(), dt.GetDay(), dt.GetHour(), dt.GetMinute(), dt.GetSecond(), msg);
+             fclose(f); }
+}
+
+// ---------------------------------------------------------------------------
 // Study
 // ---------------------------------------------------------------------------
 
@@ -138,7 +246,13 @@ SCSFExport scsf_OrderFlowAuctionStudy(SCStudyInterfaceRef sc)
         In_HUDFontSize = sc.Input[12], In_HUDColor = sc.Input[13],
         In_VAHColor = sc.Input[14], In_VALColor = sc.Input[15], In_POCColor = sc.Input[16],
         In_IBColor = sc.Input[17], In_PWHLColor = sc.Input[18], In_WVPOCColor = sc.Input[19],
-        In_LineWidth = sc.Input[20], In_ShowLabels = sc.Input[21];
+        In_LineWidth = sc.Input[20], In_ShowLabels = sc.Input[21],
+        In_ShowSignals = sc.Input[22], In_FeatureLookback = sc.Input[23],
+        In_DeltaDivLookback = sc.Input[24], In_AbsorptionVolZ = sc.Input[25],
+        In_AbsorptionStallTicks = sc.Input[26], In_ExhaustionClimaxZ = sc.Input[27],
+        In_AcceptMinVolZ = sc.Input[28], In_LongSignalColor = sc.Input[29],
+        In_ShortSignalColor = sc.Input[30], In_LogEnable = sc.Input[31],
+        In_LogFile = sc.Input[32];
     SCSubgraphRef Sub_HUD = sc.Subgraph[0];
 
     if (sc.SetDefaults)
@@ -172,6 +286,24 @@ SCSFExport scsf_OrderFlowAuctionStudy(SCStudyInterfaceRef sc)
         In_WVPOCColor.Name = "Weekly VPOC Color"; In_WVPOCColor.SetColor(180, 120, 220);
         In_LineWidth.Name = "Line Width"; In_LineWidth.SetInt(2); In_LineWidth.SetIntLimits(1, 10);
         In_ShowLabels.Name = "Show Labels / Price"; In_ShowLabels.SetYesNo(1);
+
+        // NOTE: the validated "+0.130R/trade" numbers (docs/phase2_interim_report.md)
+        // came from a 1-MINUTE chart. Run this study on a 1-min chart for fidelity to
+        // that backtest. An 800-trade/tick basis was tested (2026-07-12) as extra FADE
+        // evidence and measured SLIGHTLY NEGATIVE vs the minute-bar baseline -- if you
+        // run this on your preferred tick chart anyway, treat its signals as unvalidated
+        // until a matching Python backtest is run on that same bar basis.
+        In_ShowSignals.Name = "Show FOLLOW/FADE Signals (Phase 2/3, ungated)"; In_ShowSignals.SetYesNo(1);
+        In_FeatureLookback.Name = "Order-Flow Feature Lookback (bars)"; In_FeatureLookback.SetInt(20); In_FeatureLookback.SetIntLimits(5, 60);
+        In_DeltaDivLookback.Name = "Delta/CVD Divergence Lookback (bars)"; In_DeltaDivLookback.SetInt(5); In_DeltaDivLookback.SetIntLimits(3, 12);
+        In_AbsorptionVolZ.Name = "Absorption Volume Z-Score"; In_AbsorptionVolZ.SetFloat(2.0f); In_AbsorptionVolZ.SetFloatLimits(1.5f, 3.5f);
+        In_AbsorptionStallTicks.Name = "Absorption Price Stall (ticks)"; In_AbsorptionStallTicks.SetFloat(3.0f); In_AbsorptionStallTicks.SetFloatLimits(1.0f, 48.0f);
+        In_ExhaustionClimaxZ.Name = "Exhaustion Climax Z-Score"; In_ExhaustionClimaxZ.SetFloat(2.5f); In_ExhaustionClimaxZ.SetFloatLimits(1.5f, 4.0f);
+        In_AcceptMinVolZ.Name = "Acceptance Min Volume Z-Score"; In_AcceptMinVolZ.SetFloat(1.5f); In_AcceptMinVolZ.SetFloatLimits(0.5f, 3.0f);
+        In_LongSignalColor.Name = "FOLLOW/FADE Long Marker Color"; In_LongSignalColor.SetColor(0, 220, 0);
+        In_ShortSignalColor.Name = "FOLLOW/FADE Short Marker Color"; In_ShortSignalColor.SetColor(220, 0, 0);
+        In_LogEnable.Name = "LOG: write signals to text file"; In_LogEnable.SetYesNo(0);
+        In_LogFile.Name = "LOG: file name (in Data folder)"; In_LogFile.SetString("OrderFlowSignals_log.txt");
 
         Sub_HUD.Name = "Structural HUD"; Sub_HUD.DrawStyle = DRAWSTYLE_IGNORE;
         Sub_HUD.PrimaryColor = RGB(235, 235, 235); Sub_HUD.LineWidth = 13;
@@ -426,7 +558,165 @@ SCSFExport scsf_OrderFlowAuctionStudy(SCStudyInterfaceRef sc)
         line.Format("Nearest structure: up %.2f%s | down %.2f%s\n",
             nearUp < 1e30f ? nearUp : 0.0f, noMansUp ? " [NO-MANS-LAND]" : "",
             nearDn < 1e30f ? nearDn : 0.0f, noMansDn ? " [NO-MANS-LAND]" : "");
-        hud.Append("-- structure only; no signals ported yet (Phase 2/3 pending) --");
+        hud.Append(line.GetChars());
+
+        // ---- Pass 4: order-flow FOLLOW/FADE signal engine (live day only) --
+        // UNGATED (see file header): mirrors signals/engine.py exactly. Runs
+        // once per recalc over today's RTH bars so far; only NEWLY-fired
+        // signals get logged/alerted (persistent-int guard keyed by day).
+        hud.Append("===== ORDER-FLOW SIGNALS (ungated, validated core) =====\n");
+        if (In_ShowSignals.GetYesNo() && ref.Valid && lastInProgress && days[total - 1].RTHValid)
+        {
+            const DayProfile& liveDay = days[total - 1];
+            int rthStart = liveDay.RTHStartIdx;
+            int rthEnd = lastClosed;
+            if (rthEnd >= rthStart && ref.VAH > 0 && ref.VAL > 0 && sc.TickSize > 0)
+            {
+                const int n = rthEnd - rthStart + 1;
+                std::vector<float> absDelta(n), deltaSigned(n), cvd(n), volArr(n), hiArr(n), loArr(n), clArr(n);
+                float running = 0.0f;
+                for (int k = 0; k < n; ++k)
+                {
+                    int idx = rthStart + k;
+                    float delta = sc.AskVolume[idx] - sc.BidVolume[idx];
+                    deltaSigned[k] = delta; absDelta[k] = delta < 0 ? -delta : delta;
+                    running += delta; cvd[k] = running;
+                    volArr[k] = sc.Volume[idx];
+                    hiArr[k] = sc.High[idx]; loArr[k] = sc.Low[idx]; clArr[k] = sc.Close[idx];
+                }
+
+                const int lookback = In_FeatureLookback.GetInt();
+                const int divLookback = In_DeltaDivLookback.GetInt();
+                const float absorbZ = In_AbsorptionVolZ.GetFloat();
+                const float absorbStall = In_AbsorptionStallTicks.GetFloat();
+                const float exhaustZ = In_ExhaustionClimaxZ.GetFloat();
+                const float acceptZ = In_AcceptMinVolZ.GetFloat();
+
+                // first-qualifying-bar acceptance (trade_and_rest), precomputed
+                // once -- equivalent to Python's growing-slice re-scan (features/
+                // acceptance.py), since only the FIRST qualifying bar ever matters.
+                int firstAcceptUp = -1, firstAcceptDn = -1;
+                for (int k = 0; k < n; ++k)
+                {
+                    if (firstAcceptUp < 0 && loArr[k] > ref.VAH && RollingZ(volArr, k, lookback) >= acceptZ) firstAcceptUp = k;
+                    if (firstAcceptDn < 0 && hiArr[k] < ref.VAL && RollingZ(volArr, k, lookback) >= acceptZ) firstAcceptDn = k;
+                }
+
+                struct SigOut { int dir; int idx; bool isFollow; float price; float level; SCString why; };
+                std::vector<SigOut> todaySignals;
+                int followState[2] = { 0, 0 };   // [0]=long(dir+1) [1]=short(dir-1); 0=idle 1=armed 2=fired
+                int fadeState[2] = { 0, 0 };      // fadeDir index: [0]=fadeDir+1 [1]=fadeDir-1
+                int excursionExtIdx[2] = { -1, -1 };
+
+                for (int k = 0; k < n; ++k)
+                {
+                    for (int dSel = 0; dSel < 2; ++dSel)
+                    {
+                        const int direction = dSel == 0 ? 1 : -1;
+                        const float edge = dSel == 0 ? ref.VAH : ref.VAL;
+                        const int fadeDirSel = dSel == 0 ? 1 : 0;
+                        const bool fullyBeyond = direction > 0 ? (loArr[k] > edge) : (hiArr[k] < edge);
+                        if (fullyBeyond)
+                        {
+                            if (followState[dSel] == 0) followState[dSel] = 1;
+                            if (fadeState[fadeDirSel] == 0) fadeState[fadeDirSel] = 1;
+                            int prevExt = excursionExtIdx[fadeDirSel];
+                            bool takeExt = prevExt < 0;
+                            if (!takeExt) { if (direction > 0 && hiArr[k] > hiArr[prevExt]) takeExt = true;
+                                            if (direction < 0 && loArr[k] < loArr[prevExt]) takeExt = true; }
+                            if (takeExt) excursionExtIdx[fadeDirSel] = k;
+                        }
+
+                        // ---- FOLLOW: acceptance beyond the edge, no absorption against ----
+                        if (followState[dSel] == 1)
+                        {
+                            int firstAccept = direction > 0 ? firstAcceptUp : firstAcceptDn;
+                            if (firstAccept == k)
+                            {
+                                int a = AbsorptionAt(absDelta, deltaSigned, hiArr, loArr, k, lookback, absorbZ, absorbStall, sc.TickSize);
+                                bool against = (direction > 0 && a == -1) || (direction < 0 && a == 1);
+                                if (!against)
+                                {
+                                    SigOut s; s.dir = direction; s.idx = k; s.isFollow = true;
+                                    s.price = clArr[k]; s.level = edge; s.why = "Acceptance";
+                                    todaySignals.push_back(s);
+                                    followState[dSel] = 2;
+                                }
+                            }
+                        }
+
+                        // ---- FADE: re-entry + evidence the excursion FAILED ----
+                        if (fadeState[fadeDirSel] == 1)
+                        {
+                            bool backInside = clArr[k] > ref.VAL && clArr[k] < ref.VAH;
+                            if (backInside)
+                            {
+                                const int fadeDirActual = fadeDirSel == 0 ? 1 : -1;
+                                int extIdx = excursionExtIdx[fadeDirSel];
+                                bool hasFailure = false; SCString why;
+                                if (extIdx >= 0)
+                                {
+                                    for (int j = extIdx; j <= k; ++j)
+                                    {
+                                        int a = AbsorptionAt(absDelta, deltaSigned, hiArr, loArr, j, lookback, absorbZ, absorbStall, sc.TickSize);
+                                        if ((fadeDirActual < 0 && a == -1) || (fadeDirActual > 0 && a == 1)) { hasFailure = true; why.Append("Absorption "); }
+                                        bool bear, bull; DivergenceAt(hiArr, loArr, cvd, j, divLookback, bear, bull);
+                                        if ((fadeDirActual < 0 && bear) || (fadeDirActual > 0 && bull)) { hasFailure = true; why.Append("Divergence "); }
+                                        int x = ExhaustionConfirmedAt(absDelta, hiArr, loArr, j, lookback, exhaustZ);
+                                        if ((fadeDirActual < 0 && x == -1) || (fadeDirActual > 0 && x == 1)) { hasFailure = true; why.Append("Exhaustion "); }
+                                    }
+                                }
+                                if (hasFailure)
+                                {
+                                    SigOut s; s.dir = fadeDirActual; s.idx = k; s.isFollow = false;
+                                    s.price = clArr[k]; s.level = edge; s.why = why;
+                                    todaySignals.push_back(s);
+                                    fadeState[fadeDirSel] = 2;
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // draw markers + log/alert only NEWLY-fired signals this day
+                int& loggedDayKey = sc.GetPersistentInt(20);
+                int& loggedCount = sc.GetPersistentInt(21);
+                if (loggedDayKey != liveDay.DayKey) { loggedDayKey = liveDay.DayKey; loggedCount = 0; }
+
+                for (size_t si = 0; si < todaySignals.size(); ++si)
+                {
+                    const SigOut& s = todaySignals[si];
+                    SCDateTime sTs = sc.BaseDateTimeIn[rthStart + s.idx];
+                    s_UseTool m; m.Clear(); m.ChartNumber = sc.ChartNumber; m.DrawingType = DRAWING_TEXT;
+                    m.LineNumber = 900000 + liveDay.DayKey * 100 + (int)si;
+                    m.BeginDateTime = sTs; m.BeginValue = s.price;
+                    m.Color = s.dir > 0 ? In_LongSignalColor.GetColor() : In_ShortSignalColor.GetColor();
+                    m.FontSize = 11; m.FontBold = 1; m.AddMethod = UTAM_ADD_OR_ADJUST;
+                    m.Text.Format("%s %s\n%.2f", s.isFollow ? "FOLLOW" : "FADE", s.dir > 0 ? "LONG ^" : "SHORT v", s.price);
+                    sc.UseTool(m);
+
+                    if ((int)si >= loggedCount)
+                    {
+                        SCString msg; msg.Format("%s %s @ %.2f (level %.2f) | %s",
+                            s.isFollow ? "FOLLOW" : "FADE", s.dir > 0 ? "LONG" : "SHORT", s.price, s.level, s.why.GetChars());
+                        if (In_LogEnable.GetYesNo()) LogSig(In_LogFile.GetString(), sTs, msg.GetChars());
+                        sc.AddMessageToLog(msg, 1);
+                    }
+                }
+                loggedCount = (int)todaySignals.size();
+
+                if (todaySignals.empty()) hud.Append("(none yet today)\n");
+                else
+                {
+                    const SigOut& last = todaySignals.back();
+                    line.Format("%d today | last: %s %s @ %.2f\n", (int)todaySignals.size(),
+                        last.isFollow ? "FOLLOW" : "FADE", last.dir > 0 ? "LONG" : "SHORT", last.price);
+                    hud.Append(line.GetChars());
+                }
+            }
+        }
+        else hud.Append("(waiting for live RTH day / valid PD VA)\n");
+        hud.Append("-- D-013 gates/veto NOT applied (failed weak-OOS); MOMO not ported --");
 
         Sub_HUD.PrimaryColor = In_HUDColor.GetColor(); Sub_HUD.LineWidth = In_HUDFontSize.GetInt();
         sc.AddAndManageSingleTextDrawingForStudy(sc, 0, In_HUDHoriz.GetInt(), In_HUDVert.GetInt(),

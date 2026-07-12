@@ -3,28 +3,50 @@
 The C++ study/DLL that faithfully executes ONLY validated logic on the live feed.
 The study is an executor, not a place to invent signals.
 
-## `OrderFlowAuctionStudy.cpp` — current, in progress
+## `OrderFlowAuctionStudy.cpp` — current
 
-The ground-up rebuild's live study. **Structural layer only** (PD VAH/POC/VAL, Initial
-Balance, weekly VPOC/PWH/PWL, no-man's-land readout) — deliberately contains **no**
-FADE/FOLLOW/REV signal logic yet, per CLAUDE.md dev rule #2 ("a trigger is not written
-into ACSIL until it is validated in Python"). Mirrors `structure/levels.py` +
-`structure/value_area.py` + `structure/sessions.py`; if the two diverge, Python
-(backtested, unit-tested) is authoritative.
+The ground-up rebuild's live study. Two layers, built and confirmed compiling/running
+in Sierra Chart by the user (structural layer, first build) with the signal layer added
+2026-07-12:
 
-Implements the **D-011 window correction** (`docs/decisions.md`): prior-day value area is
-built from the FULL 18:00-ET-anchored session (Asia+UK+US), not RTH-only as the legacy
-study and its accompanying note originally claimed — that RTH-only assumption was tested
-against a real chart reading and falsified. Initial Balance and RTH open/high/low/close
-are still tracked separately from RTH bars only, since IB is inherently an RTH concept.
+**Structural layer** (PD VAH/POC/VAL, Initial Balance, weekly VPOC/PWH/PWL, no-man's-land
+readout). Mirrors `structure/levels.py` + `structure/value_area.py` + `structure/sessions.py`.
+Implements the **D-011 window correction**: prior-day value area is built from the FULL
+18:00-ET-anchored session (Asia+UK+US), not RTH-only as the legacy study and its
+accompanying note originally claimed — tested against a real chart reading and falsified.
+IB and RTH open/high/low/close are still tracked from RTH bars only.
 
-**Not yet built/tested in Sierra Chart** — written and reasoned through against the
-legacy files' proven ACSIL patterns, but there's no ACSIL compiler in the research
-environment. Build it in `ACS_Source`, report any compile errors back for a fix.
+**Order-flow signal layer** (added 2026-07-12): the **UNGATED** FOLLOW/FADE event engine
+only — delta/CVD divergence, absorption, exhaustion, trade-and-rest acceptance — mirroring
+`signals/engine.py` + `features/{delta,absorption,exhaustion,acceptance}.py` exactly. This
+is the "trustworthy core" validated with costs across three regime periods
+(`docs/phase2_interim_report.md`): +0.130R/trade combined (n=256), FADE positive in all
+six period×bar-basis cells tested. Includes a pipe-delimited signal logger
+(`In_LogEnable`/`In_LogFile`) so live-fired signals can be reconciled against the Python
+backtest (Phase 7) — the mechanism for accumulating genuine forward out-of-sample data,
+which is the single biggest open question left in the project.
+
+**Deliberately NOT ported** (see the file's header comment for the evidence): the D-013
+regime gates and live conflict veto (`fusion/decision.py`) — measured in-sample only and
+FAILED weak-OOS on unseen thin-contract periods (fusion −0.057R vs ungated +0.017R on data
+the rules never saw); and the MOMO pullback engine (`signals/momentum.py`) — lost to
+FOLLOW head-to-head combined, regime-complementary but with no validated regime gate to
+select between them. Do not add either without new decisions.md evidence.
+
+**Signal-layer addition not yet built/tested in Sierra Chart** — the structural layer was
+already confirmed working; the order-flow layer is new and, per the same constraint as
+before, there's no ACSIL compiler in the research environment. Build it in `ACS_Source`,
+report any compile errors back for a fix. Brace/paren balance and input-index consistency
+were checked programmatically before handoff, but that is not a substitute for compilation.
 
 **Not yet done:** weekly VPOC has NOT been re-validated under the D-011 full-session
-pattern (still RTH-only, matching the legacy study, flagged in the file's comments as an
-open question). Signal logic (FADE/FOLLOW/REV) is Phase 2/3 territory — Python first.
+pattern (still RTH-only, matching the legacy study). REV is not ported (Phase 2/3
+ordering: FOLLOW/FADE first, per CLAUDE.md §1.3).
+
+**Run on a 1-minute chart** for fidelity to the validated backtest — the numbers above
+came from 1-minute bars. An 800-trade/tick basis was tested as extra FADE evidence and
+measured slightly negative; if you run this on your preferred tick chart, treat its
+signals as unvalidated until a matching Python backtest exists on that bar basis.
 
 ## `legacy/`
 

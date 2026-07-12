@@ -101,3 +101,47 @@ def test_missing_value_area_returns_no_signals():
     snap.pd_va = {"poc": None, "vah": None, "val": None}
     bars = _inside_baseline(10)
     assert generate_signals(bars, snap, tick_size=0.25) == []
+
+
+def test_fade_fires_on_extra_evidence_alone():
+    """A quiet excursion + bare re-entry has NO native failure evidence
+    (test_fade_does_not_fire_on_bare_reentry) -- but a ts-stamped absorption
+    event from a finer bar basis inside the excursion window must fire it."""
+    from dataclasses import dataclass
+    from datetime import datetime as _dt
+
+    @dataclass
+    class _ExtraEv:
+        ts: object
+        direction: str
+
+    bars = _inside_baseline(20) + [
+        _bar(20, 110.5, 112.0, 111.5, volume=55, delta=10),   # quiet excursion above VAH
+        _bar(21, 104.0, 111.0, 105.0, volume=52, delta=-5),   # quiet re-entry
+    ]
+    # 800t-style bearish absorption timestamped DURING the excursion
+    ev = _ExtraEv(ts=_T0 + timedelta(minutes=20, seconds=30), direction="bearish")
+    signals = generate_signals(bars, _snap(), tick_size=0.25, extra_fade_evidence=[ev])
+    fades = [s for s in signals if s.family == "FADE"]
+    assert len(fades) == 1
+    assert fades[0].direction == -1
+    assert ev in fades[0].events
+
+
+def test_extra_evidence_outside_window_or_wrong_direction_ignored():
+    from dataclasses import dataclass
+
+    @dataclass
+    class _ExtraEv:
+        ts: object
+        direction: str
+
+    bars = _inside_baseline(20) + [
+        _bar(20, 110.5, 112.0, 111.5, volume=55, delta=10),
+        _bar(21, 104.0, 111.0, 105.0, volume=52, delta=-5),
+    ]
+    too_early = _ExtraEv(ts=_T0 + timedelta(minutes=5), direction="bearish")
+    wrong_dir = _ExtraEv(ts=_T0 + timedelta(minutes=20, seconds=30), direction="bullish")
+    signals = generate_signals(bars, _snap(), tick_size=0.25,
+                               extra_fade_evidence=[too_early, wrong_dir])
+    assert [s for s in signals if s.family == "FADE"] == []

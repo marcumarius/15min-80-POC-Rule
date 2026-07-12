@@ -239,6 +239,17 @@ when the move to order-flow triggers changes the signal set.
   ideally, on a fourth period.
 - **Re-test trigger:** forward months (U6 beyond Jul 10 / Z6) or older H26/Z25 data;
   and re-measure after FADE gains absorption evidence (gap_holds n=27 is smallish).
+- **WEAK-OOS TESTED 2026-07-12 — NO SUPPORT, harmful in one period.** Fusion system
+  (gates + live veto, unchanged) on the pre-front-month periods the rules never saw:
+  H26 Jul-Dec25: fusion −0.202R vs ungated −0.069R (gates made a bad period worse);
+  M6 Nov-Mar: +0.106R vs +0.104R (no help). Combined: fusion −0.057R vs ungated +0.017R.
+  Major caveat cutting both ways: these are thin-liquidity contract months where the
+  engine's own baseline barely works (price discovery was on the other contract), so
+  this neither confirms nor cleanly falsifies — but it removes any claim of OOS
+  support. Consequence: keep flags OFF, treat the in-sample +0.35-0.51R gated numbers
+  as heavily inflated until a LIQUID unseen period (forward data) decides. The
+  trustworthy core remains the ungated front-month baseline (+0.13R, n=256) and FADE's
+  6/6-cell robustness.
 
 ---
 

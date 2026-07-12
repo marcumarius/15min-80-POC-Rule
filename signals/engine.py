@@ -73,7 +73,8 @@ def _back_inside(bar, vah: float, val: float) -> bool:
 
 
 def generate_signals(bars: list, snapshot, tick_size: float,
-                      feature_lookback: int = 20) -> list:
+                      feature_lookback: int = 20,
+                      extra_fade_evidence: list = None) -> list:
     """Run the FOLLOW/FADE state machine over `bars` (one session, in order)
     against snapshot.pd_va. Returns Signals in firing order.
 
@@ -81,6 +82,13 @@ def generate_signals(bars: list, snapshot, tick_size: float,
     filtering (no-man's-land D-004, conflict veto D-003) -- this module only
     answers "did a structural setup get order-flow confirmation, and by
     which event?"
+
+    `extra_fade_evidence`: optional ts-stamped events from a FINER bar basis
+    (e.g. absorption detected on 800-trade bars -- unmeasurable on minute
+    bars, see interim report). Each needs `.ts` (tz-aware) and `.direction`
+    ("bullish"/"bearish"). Matched into the FADE failure-evidence window by
+    TIME (excursion-extreme bar's ts through the re-entry bar's ts), same
+    direction convention as the native detectors.
     """
     vah, val = snapshot.pd_va.get("vah"), snapshot.pd_va.get("val")
     if vah is None or val is None or not bars:
@@ -135,6 +143,13 @@ def generate_signals(bars: list, snapshot, tick_size: float,
                 failure_events = []
                 if ext_idx is not None:
                     window = range(ext_idx, i + 1)
+                    # finer-bar evidence (e.g. 800t absorption), matched by TIME
+                    if extra_fade_evidence:
+                        t0, t1 = bars[ext_idx].ts, bar.ts
+                        want = "bearish" if fade_dir < 0 else "bullish"
+                        for ev in extra_fade_evidence:
+                            if t0 <= ev.ts <= t1 and ev.direction == want:
+                                failure_events.append(ev)
                     # absorption against the excursion at/after its extreme
                     for j in window:
                         for a in absorption_by_idx.get(j, []):

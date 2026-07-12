@@ -173,6 +173,32 @@ filters:
     rationale: daily-range ATR used for ATR-normalized distances/tolerances
 
 # ─────────────────────────────────────────────────────────────────────────────
+# FUSION (Phase 5): regime -> structure -> trigger -> conflict, one decision
+# ─────────────────────────────────────────────────────────────────────────────
+fusion:
+  d013_follow_gate:
+    default: false          # FLAG-ONLY (D-013 Provisional): FOLLOW only on open-drive days
+    rationale: >
+      open_drive gated FOLLOW at +0.388R vs -0.024R without, sign-consistent in
+      all three periods (D-013). In-sample; default off until a fourth period.
+  d013_fade_gap_veto:
+    default: false          # FLAG-ONLY (D-013): veto FADE on gap-holds days
+    rationale: >
+      FADE on held-gap days -0.164R vs +0.259R otherwise, signs --- (D-013).
+      A gap holding through the IB is initiative; fading it is fighting it.
+  d013_narrow_ib_follow_veto:
+    default: false          # FLAG-ONLY (D-013): veto FOLLOW on narrow-IB days
+    rationale: >
+      narrow-IB days measured CONSISTENTLY negative for FOLLOW (-0.249R delta,
+      ---): the "narrow IB = breakout day" folklore inverted in this data.
+  live_conflict_veto:
+    default: true           # D-003 live formulation: skip if an opposing signal fired earlier today
+    rationale: >
+      hindsight veto is unexecutable; the live version (no prior opposing
+      signal) measured regime-dependent UNGATED but positive in all periods
+      once the D-013 gates run first (regime before conflict, D-002).
+
+# ─────────────────────────────────────────────────────────────────────────────
 # RISK & MANAGEMENT  (see Decision D-006)
 # ─────────────────────────────────────────────────────────────────────────────
 management:

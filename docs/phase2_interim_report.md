@@ -286,12 +286,105 @@ trades and 27% less drawdown.
 Treat +0.31-0.35R as an in-sample upper bound; D-013 promotion still
 requires a fourth period (forward months or older data).
 
+## Phase 5 skeleton built and verified end-to-end (fusion/decision.py)
+
+`FusionSession`: regime (D-013 gates, flags default OFF) → conflict (D-003
+live veto, default ON, and a *stricter* rule than run_gated: signals the
+gates skipped still count toward conflict state, because that information
+existed live) → conviction (HIGH/MODERATE/LOW from regime alignment +
+trigger-event count). Every decision carries named rationale. 7 unit tests.
+
+End-to-end with flags ON (same 9 months, costs in):
+
+| | n | win% | PF | exp | totR | maxDD |
+|---|---|---|---|---|---|---|
+| Fusion-decided | 74 | 66.2 | 2.76 | **+0.512R** | +37.9 | **3.5R** |
+| (run_gated, looser conflict) | 98 | 59.2 | 1.93 | +0.352R | +34.5 | 4.1R |
+
+All three periods positive (H26 +0.398R / M6 +0.819R / U6 +0.236R). The
+stricter conflict rule dropped 24 trades that were net losers — plausible
+mechanism, but note honestly: that is one more selection step measured on
+the same 9 months. Conviction monotonicity (the Phase 5 acceptance
+criterion): HIGH +0.898R > MODERATE +0.490R — right direction but HIGH has
+n=4, far too few to claim the criterion met. LOW never fires post-gates.
+
+## Hybrid bars (800t absorption as extra FADE evidence): NO IMPROVEMENT
+
+Extended `generate_signals()` with `extra_fade_evidence` (ts-matched into
+the FADE failure window; unit-tested) and ran baseline-vs-hybrid on
+identical days with identical fusion decisions. Combined: hybrid +0.468R
+(n=73) vs baseline +0.512R (n=74) — slightly WORSE. M6/U6 unchanged
+(absorption events rarely alter the take set); H26 −0.09R (earlier/weaker
+FADE fires + shifted conflict cascades). **Verdict: traded-volume absorption
+as additional FADE evidence is falsified as an improvement at current
+calibration.** The engine extension stays (general-purpose, tested), the
+evidence feed stays OFF. Absorption's remaining candidacies: FOLLOW-side
+veto, and the true resting-liquidity form from depth data (the original
+motivation — traded-volume absorption is only a proxy).
+
+## Weak-OOS on unseen (thin) periods: D-013 gates get NO support
+
+| Unseen period | Ungated | Fusion (gates+veto) |
+|---|---|---|
+| H26 pre-front (Jul-Dec25) | −0.069R (n=132) | **−0.202R** (n=56) |
+| M6 pre-front (Nov-Mar) | +0.104R (n=133) | +0.106R (n=50) |
+| Combined | +0.017R | **−0.057R** |
+
+Stated plainly: on data the D-013 rules never saw, the gates helped nowhere
+and hurt in the H26 pre-front period. Caveat cutting both ways: these are
+thin-contract months (price discovery was on the other contract; the
+engine's own baseline barely functions there — note the engine is +0.13R on
+liquid front months vs ~0 on thin months, itself a liquidity finding). So
+this is inconclusive-to-negative: it does NOT falsify D-013 the way the
+D-012 inversion did, but it strips any claim of OOS support. **Flags stay
+OFF. The in-sample +0.35-0.51R gated/fusion numbers must be treated as
+heavily inflated. The trustworthy core of the project remains: ungated
+front-month baseline +0.130R (n=256, costs in) and FADE positive in all six
+period×bar cells.** Only a LIQUID unseen period — i.e. forward data as it
+accrues — can promote D-013.
+
+## Book+tape absorption lab: NEGATIVE RESULT, thin book confirmed twice
+
+Two independent tests, both negative:
+
+1. **Blind day-scan (6 January H26 depth days, 734 "true absorption"
+   episodes at recalibrated thresholds — 4x displayed size, ≥15 contracts):
+   53% hit rate combined (coin-flip), day range 36-62%, no consistent
+   direction. First calibration attempt (300-contract minimum, blind guess)
+   fired ZERO events all six days — real resting size never gets close;
+   median episode traded=2 contracts, p99=16, across a 400k-trade sample.**
+2. **Targeted check on the user's newly-supplied MNQU26 July 8 depth**
+   (same day/contract already fully analyzed via .scid): scanned the
+   resting book in 20-minute windows around the two KNOWN turning points
+   already found via CVD divergence -- the 11:25 session low (29034) and
+   the 12:17 FADE trigger (29236.75). The most-churned bid/ask levels in
+   both windows show constant 1-20-contract updates (thousands of updates
+   per level, sizes never exceeding ~20) and are not even concentrated at
+   the exact turning prices -- just wherever price consolidated for a few
+   minutes. No wall, no iceberg, nothing distinguishing these moments from
+   ambient book activity.
+
+**Conclusion: on this instrument/feed, "large passive size defending a
+level" is not an observable, extractable signal at these turning points --
+MNQ's displayed book is thin, high-frequency, and churns in small clips
+regardless of what price is doing.** This does not undermine CVD
+divergence (an aggregate order-flow measure, not a book-depth measure,
+and independently the strongest FADE evidence all session) -- it says the
+book-depth layer doesn't add what was hoped. Depth data stays useful for
+what it already proved (validating `.depth`'s format, confirming ~80-89%
+trade-to-touch accuracy) but is not, at current technique, a productive
+absorption source. Do not invest further engineering here without a new
+hypothesis for WHAT book pattern to look for.
+
 ## Next steps (in order)
 
-1. Wire the D-013 gates + live veto into a single `fusion/` decision module
-   (Phase 5 skeleton) behind config flags, defaults off.
-2. Hybrid bars (minute engine + trade-bar absorption events as FADE evidence).
-3. Book+tape absorption lab (Jan depth days); IS/OOS on a fourth period.
+1. Forward-data OOS as it accrues (the only real D-013 test remaining) --
+   prepare the validated slice (ungated engine + signal logging) for
+   sim/ACSIL so forward tracking can start; every week without it is a week
+   the open question stays open.
+2. If revisiting depth: a genuinely new hypothesis (e.g. order-count/
+   cancel-rate spoofing signatures, not size-ratio absorption) rather than
+   re-running the same technique with different thresholds.
 2. Independent-sample test of D-012 (older data or forward months) + proper
    IS/OOS split.
 3. Phase 5: fuse open-location regime + structure + trigger + conflict state
