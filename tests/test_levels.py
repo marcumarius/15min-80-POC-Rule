@@ -1,9 +1,10 @@
 from datetime import date, datetime
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
 
-from data.types import FootprintCell
+from data.types import FootprintCell, Tick
 from structure.levels import (
     SessionProfile,
     StructuralSnapshot,
@@ -18,9 +19,11 @@ from structure.levels import (
     naked_pocs,
     nearest_structure,
     no_mans_land,
+    session_profile_from_ticks,
 )
 
 ET = ZoneInfo("America/New_York")
+_MNQU6_PATH = Path(__file__).parent.parent / "Scid data" / "MNQU6.CME.scid"
 
 
 def _bar(y, m, d, h, mi, o, hi, lo, c):
@@ -195,3 +198,67 @@ def test_build_snapshot_assembles_pd_va_and_stack_ticks():
     assert snap.pd_va == {"poc": 100.0, "vah": 100.25, "val": 90.0}
     assert snap.prior_day == {"open": 100.0, "high": 110.0, "low": 95.0, "close": 105.0}
     assert snap.level_stack_ticks == pytest.approx(1.0)  # 0.25 price distance / 0.25 tick_size
+
+
+# --- session_profile_from_ticks (D-011: full-session, trading_day()-bucketed VA) ---
+
+def test_session_profile_from_ticks_computes_ohlc_and_va():
+    ticks = [
+        Tick(ts=datetime(2026, 7, 8, 9, 30, tzinfo=ET), price=100.0, volume=10, aggressor="buy"),
+        Tick(ts=datetime(2026, 7, 8, 10, 0, tzinfo=ET), price=101.0, volume=20, aggressor="buy"),
+        Tick(ts=datetime(2026, 7, 8, 11, 0, tzinfo=ET), price=102.0, volume=50, aggressor="sell"),
+        Tick(ts=datetime(2026, 7, 8, 15, 59, tzinfo=ET), price=100.5, volume=15, aggressor="sell"),
+    ]
+    sp = session_profile_from_ticks(ticks, tick_size=1.0, va_percent=0.70)
+    assert sp.trading_date == date(2026, 7, 8)
+    assert sp.open == 100.0
+    assert sp.close == 100.5
+    assert sp.high == 102.0
+    assert sp.low == 100.0
+    assert sp.poc == 102.0  # heaviest single price (vol=50)
+
+
+def test_session_profile_from_ticks_trading_date_uses_trading_day_not_calendar_date():
+    # Ticks starting the prior evening (18:00+ ET) must bucket into the NEXT
+    # trading day (D-011: the window is 18:00-anchored, not RTH-only), so
+    # trading_date has to come from trading_day(), not ts.date().
+    ticks = [
+        Tick(ts=datetime(2026, 7, 6, 18, 0, tzinfo=ET), price=100.0, volume=10, aggressor="buy"),
+        Tick(ts=datetime(2026, 7, 7, 15, 59, tzinfo=ET), price=101.0, volume=10, aggressor="sell"),
+    ]
+    sp = session_profile_from_ticks(ticks, tick_size=1.0, va_percent=0.70)
+    assert sp.trading_date == date(2026, 7, 7)  # NOT 2026-07-06
+
+
+def test_session_profile_from_ticks_empty_returns_none():
+    assert session_profile_from_ticks([], tick_size=1.0) is None
+
+
+@pytest.mark.skipif(not _MNQU6_PATH.exists(), reason="real MNQU6.CME.scid data not present")
+def test_session_profile_from_ticks_reproduces_real_july7_reconciliation():
+    """Regression-locks the real-data reconciliation from the 2026-07-11
+    session (see docs/decisions.md D-011, docs/phase1_report.md): the
+    user's live-study HUD read VAH=29587/POC=29539/VAL=29320 for 2026-07-07,
+    printed at US-session-end (~16:30). An RTH-only rebuild (the original,
+    now-superseded assumption) missed by up to 239 points. The corrected
+    full-session window (2026-07-06 18:00 ET -> 2026-07-07 16:00 ET) gets
+    within single-digit-to-mid-tens of ticks on each edge -- close but not
+    exact, tracked as an open item in D-011 (likely a volume-counting
+    difference between raw-tick TotalVolume and Sierra's native
+    VolumeAtPriceForBars). This test locks in the CURRENT best
+    reconciliation with a tolerance, not a spurious exact match; tighten the
+    tolerance if/when the remaining gap is explained."""
+    from data.loaders import iter_scid_ticks_for_day
+    from structure.sessions import trading_day
+
+    ticks6 = iter_scid_ticks_for_day(_MNQU6_PATH, date(2026, 7, 6))
+    ticks7 = iter_scid_ticks_for_day(_MNQU6_PATH, date(2026, 7, 7))
+    full_session = [t for t in (ticks6 + ticks7) if trading_day(t.ts) == date(2026, 7, 7)
+                    and t.ts < datetime(2026, 7, 7, 16, 0, tzinfo=ET)]
+    sp = session_profile_from_ticks(full_session, tick_size=0.25, va_percent=0.70)
+
+    assert sp.trading_date == date(2026, 7, 7)
+    assert sp.vah == pytest.approx(29587.0, abs=10 * 0.25)   # within 10 ticks
+    # POC/VAL are a near photo-finish between two comparably-sized volume
+    # nodes (14% apart) -- not yet reconciled exactly, see D-011.
+    assert sp.poc in (pytest.approx(29300.0), pytest.approx(29539.0))

@@ -154,6 +154,57 @@ when the move to order-flow triggers changes the signal set.
   and overnight-retest reactions outperform an unstacked/non-retest baseline, cost-modeled
   and OOS.
 
+### D-011 — PD VAH/POC/VAL window is FULL session (18:00 prior day → RTH close), NOT RTH-only
+- **Date:** 2026-07-11
+- **Status:** Accepted (supersedes the RTH-only claim in `How the PDVAHPOCVOL is generated.txt`)
+- **Evidence:** Both legacy `.cpp` files' `secs < sessStartSec || secs >= sessEndSec` filter,
+  and the user-supplied note, describe the value area as built from **09:30-16:00 ET only**.
+  Real-data reconciliation against the user's live-study HUD reading for 2026-07-07
+  (VAH=29587, POC=29539, VAL=29320, printed at US-session-end ~16:30) falsified this: an
+  RTH-only rebuild of 2026-07-07 gave POC=29300/VAH=29508/VAL=29235 — off by up to 239
+  points. Rebuilding from the **full session** (2026-07-06 18:00 ET → 2026-07-07 ~16:00-16:45
+  ET, i.e. Asia+UK+US) gave VAH=29584-29588 (within ~3-10 ticks of 29587) and, when the POC
+  tie between two comparably-sized volume nodes (4353 vs 3743 contracts, only 14% apart) is
+  broken toward 29539 instead of 29300, VAL comes out at 29316.25 (within 15 ticks of 29320).
+  Both edges independently land close to the target only under the full-session window,
+  never under RTH-only, across every end-boundary tried (16:00/16:30/16:45).
+- **Decision:** `structure/levels.py::session_profile_from_ticks()` must be fed the full
+  18:00-anchored session (prior day 18:00 ET → current RTH close), not an RTH-filtered tick
+  set, when building the PD VA reference. The RTH-only description in the source `.txt` note
+  and both legacy `.cpp` files' code comments is superseded for this specific mechanism —
+  the code's own session-time filter apparently does not represent what the live study's
+  chart-displayed values actually reflect (possibly `VolumeAtPriceForBars` itself accumulates
+  across the full chart history per bar regardless of the `secs` filter's effect on which
+  *sessions* get keyed, rather than the filter gating which *volume* is accumulated -- worth
+  re-reading the C++ with this specific question before Phase 2).
+- **Re-test trigger:** the remaining POC/VAL gap (tens of ticks, not hundreds) is most likely
+  a volume-counting difference between raw-tick `TotalVolume` summation and Sierra's native
+  `VolumeAtPriceForBars` -- re-test once a second independent day is reconciled, and ideally
+  once Sierra's own per-price volume numbers for one day are available to diff bin-by-bin
+  rather than only comparing final POC/VAH/VAL.
+
+### D-012 — Open-location regime gate: the edge lives on out-of-balance opens
+- **Date:** 2026-07-12
+- **Status:** Provisional (flag-only: `open_outside_value_gate`, default false)
+- **Evidence:** First full batch of the order-flow FOLLOW/FADE engine (docs/
+  phase2_interim_report.md). Splitting all signals by whether the day's RTH open was
+  inside or outside the prior-day value area — a fact known AT THE OPEN, no hindsight:
+  MNQM6 front-month: outside-open days +0.426R raw (n=62, PF 2.52) vs inside-open
+  −0.037R (n=40); MNQU6: outside-open +0.227R (n=25, PF 1.60) vs inside-open −0.097R
+  (n=25). Direction of the split replicated in both periods. Context: the live
+  (no-hindsight) conflict veto was found regime-dependent — strong in the trending
+  period, inverted in the choppy one — and this open-location gate is the first
+  regime read that explains the split with information available at signal time.
+  Auction-theoretically coherent: the entire 80%-rule framework premises an
+  out-of-balance open.
+- **Decision:** Ship as a flag only (dev rule 10): two adjacent, partially-overlapping
+  in-sample periods are not independent confirmation. Do NOT hard-suppress inside-open
+  days yet. Feed open-location into Phase 5's regime layer as the first
+  regime → structure → trigger input.
+- **Re-test trigger:** an independent sample (older data, or forward months), and a
+  check that the inside-open negative isn't driven by the untuned absorption/exhaustion
+  features (FADE currently keys almost entirely off CVD divergence).
+
 ---
 
 ## Ledger (quick index)
@@ -170,3 +221,5 @@ when the move to order-flow triggers changes the signal set.
 | D-008 | Costs mandatory | Accepted |
 | D-009 | True VAP required | Accepted |
 | D-010 | Stacked PD levels + overnight VP | Provisional |
+| D-011 | PD VA window is full session, not RTH-only | Accepted |
+| D-012 | Open-location regime gate (out-of-balance opens) | Provisional |

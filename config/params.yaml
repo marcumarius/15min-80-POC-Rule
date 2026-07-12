@@ -14,6 +14,15 @@ meta:
   point_value: 2.0           # $/point (MNQ). NQ=20, MES=5
   tick_size: 0.25
   timezone: America/New_York # all session logic in ET; handle DST
+  scid_price_scale: 0.01
+  scid_price_scale_rationale: >
+    multiply .scid file's raw Close float by this to get the real price.
+    Empirically validated 2026-07-11 against a real MNQU6.CME.scid file:
+    consecutive Close diffs were exact multiples of 25 raw units, which is
+    exactly 0.25 (MNQ's tick size) once scaled by 0.01 -- confirms 2 implied
+    decimal places, not a universal Sierra constant. Re-verify per-symbol if
+    a different instrument's tick diffs don't come out as clean tick
+    multiples after scaling.
 
 # ─────────────────────────────────────────────────────────────────────────────
 # STRUCTURAL  (context: where price is relative to auction references)
@@ -86,7 +95,15 @@ order_flow:
   absorption_price_stall_ticks:
     default: 3              # max price travel that still qualifies as absorption
     range: [1, 6]
-    rationale: heavy volume + minimal travel = passive defense of a level
+    rationale: >
+      heavy volume + minimal travel = passive defense of a level. MEASURED
+      2026-07-12 (docs/phase2_interim_report.md): on 1-MINUTE MNQ bars this
+      definition fires ZERO events at ANY threshold (median 1-min range is
+      ~91 ticks in the 2026 vol regime; |delta| and range are inherently
+      correlated at minute granularity, so a relative-range variant also
+      failed). These params are only meaningful at the per-price FOOTPRINT
+      level -- the detector must be rebuilt on FootprintCells (per-price
+      bid/ask ladders), not on bars. Until then FADE runs on CVD divergence.
 
   # --- Exhaustion (climactic initiative that fails to extend) ---
   exhaustion_climax_z:
@@ -129,6 +146,14 @@ filters:
   conflict_veto:
     default: true
     rationale: opposing same-session reads → stand aside (D-003); biggest noise filter
+  open_outside_value_gate:
+    default: false           # FLAG-ONLY (D-012, Provisional) until an independent test
+    rationale: >
+      only trade days whose RTH open is outside the prior-day value area
+      (out-of-balance open). Replicated across both 2026 contract periods
+      (D-012): outside-open days +0.43R/+0.23R raw vs inside-open days
+      flat-to-negative in both. Two adjacent in-sample periods = not yet
+      independent confirmation; ships as a flag per dev rule 10.
   atr_period:
     default: 14
     rationale: daily-range ATR used for ATR-normalized distances/tolerances
@@ -145,6 +170,15 @@ management:
     default: 15            # MNQ points; sizing sanity floor
     range: [10, 30]
     rationale: prevents absurd size on tiny stops; from cost-modeled backtests
+  max_stop_atr:
+    default: 0.5           # cap stop distance at this x daily ATR
+    range: [0.2, 1.5]
+    rationale: >
+      structural stops (the VA edge) blow out to 400-800pts on gap days when
+      acceptance fires far beyond the edge (2026-07-12 batch, docs/
+      phase2_interim_report.md issue 1), distorting R. Cap at an ATR multiple:
+      stop = the TIGHTER of the structural edge and entry -/+ max_stop_atr*ATR.
+      0.5 is a first guess, not tuned -- revisit with the bigger sample.
   tgt1_R:
     default: 1.5           # first scale target (R multiple)
     range: [1.0, 2.5]

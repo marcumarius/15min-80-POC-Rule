@@ -3,20 +3,30 @@
 Phase 1 deliverable (docs/phase1_foundation_engine.md section 3.1).
 ET-align, deduplicate, sort; DST-safe; preserve per-price bid/ask volume.
 
-*** UNVALIDATED ***: no sample .scid, .depth, or Rithmic export exists in
-this repo. The .scid parser below follows Sierra Chart's documented
-s_IntradayFileHeader/s_IntradayRecord binary layout (56-byte header read via
-its own HeaderSize field, 40-byte fixed records), and assumes UTC-stamped
-records per Sierra's documented default. Per CLAUDE.md's "evidence before
-trust" rule, do not treat this as ground truth until it has reproduced a
-known day's OHLC against Sierra Chart's own display -- see the timezone-bleed
-warning in docs/phase1_foundation_engine.md section 5.
+VALIDATED 2026-07-11 against the user's real MNQU6.CME.scid file (byte-level
+inspection, see docs/phase1_report.md). Two assumptions in an earlier draft
+of this parser were WRONG and are fixed here:
+
+1. There is a 4-byte "SCID" magic signature before the header fields --
+   HeaderSize is NOT the first 4 bytes of the file, it's the next 4 (the
+   original code read the magic bytes as an int and got a nonsense
+   "header size" of over a billion).
+2. The per-record DateTime field is an **int64 of microseconds** since
+   1899-12-30 00:00:00 UTC, not an 8-byte double of days. Reading it as a
+   double produced a denormalized near-zero value; the int64 interpretation
+   produces clean, monotonically increasing, sub-second-resolution
+   timestamps that match real trading hours.
+3. Price is stored scaled: raw_float / 100.0 == real price. Confirmed by
+   consecutive Close diffs in real data always being exact multiples of 25
+   raw units, i.e. exact multiples of MNQ's 0.25 tick size once divided by
+   100 -- see `meta.scid_price_scale` in config/params.yaml.
 """
 import csv
+import os
 import struct
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Iterable, Iterator
+from typing import Iterable, Iterator, Optional
 from zoneinfo import ZoneInfo
 
 from data.types import FootprintCell, Tick
@@ -24,15 +34,27 @@ from data.types import FootprintCell, Tick
 _ET = ZoneInfo("America/New_York")
 _SCDATETIME_EPOCH = datetime(1899, 12, 30, tzinfo=timezone.utc)  # OLE Automation date epoch
 
-_SCID_RECORD_FMT = "<dffffIIII"  # datetime, O,H,L,C, NumTrades, TotalVolume, BidVolume, AskVolume
+_SCID_MAGIC = b"SCID"
+# datetime(int64 microseconds), O,H,L,C(float32), NumTrades,TotalVolume,BidVolume,AskVolume(uint32)
+_SCID_RECORD_FMT = "<qffffIIII"
 _SCID_RECORD_SIZE = struct.calcsize(_SCID_RECORD_FMT)
 
 
-def _scdatetime_to_et(raw: float) -> datetime:
-    """SCDateTime -> tz-aware ET. Sierra stores the integer part as days
-    since 1899-12-30 and the fractional part as time-of-day, in UTC."""
-    utc_dt = _SCDATETIME_EPOCH + timedelta(days=raw)
+def _scdatetime_to_et(raw_micros: int) -> datetime:
+    """SCDateTime (int64 microseconds since 1899-12-30 UTC) -> tz-aware ET."""
+    utc_dt = _SCDATETIME_EPOCH + timedelta(microseconds=raw_micros)
     return utc_dt.astimezone(_ET)
+
+
+def _read_scid_header(f) -> tuple:
+    """Read and validate the s_IntradayFileHeader; returns (header_size, record_size)."""
+    magic = f.read(4)
+    if magic != _SCID_MAGIC:
+        raise ValueError(f"not a .scid file (expected {_SCID_MAGIC!r} magic, got {magic!r})")
+    header_size, record_size = struct.unpack("<II", f.read(8))
+    if record_size != _SCID_RECORD_SIZE:
+        raise ValueError(f"unexpected .scid record size {record_size} (expected {_SCID_RECORD_SIZE})")
+    return header_size, record_size
 
 
 def classify_aggressor(price: float, bid: float, ask: float) -> str:
@@ -58,30 +80,93 @@ def _dedupe_sort(ticks: list) -> list:
     return out
 
 
-def _load_scid_ticks(path: Path) -> list:
-    """Parse a Sierra Chart .scid file (per-tick storage) into Ticks.
+def _price_scale() -> float:
+    from config import load_config
+    return load_config().meta.scid_price_scale
 
-    Each 40-byte record's OHLC are all equal to the trade price when the
-    chart is configured for tick-level (not time-bar) storage; BidVolume vs
-    AskVolume classify the aggressor directly, so classify_aggressor() is not
-    needed here -- Sierra has already done that split at write time.
+
+def _record_to_tick(chunk: bytes, price_scale: float) -> Tick:
+    raw_dt, _o, _h, _l, close, _num_trades, total_vol, bid_vol, ask_vol = \
+        struct.unpack(_SCID_RECORD_FMT, chunk)
+    ts = _scdatetime_to_et(raw_dt)
+    # NumTrades/O/H/L are unreliable for per-trade records in real exports
+    # (Open is frequently 0 or uninitialized garbage) -- Close is the trade
+    # price and BidVolume/AskVolume already encode the aggressor side.
+    if ask_vol >= bid_vol:
+        aggressor = "buy" if ask_vol > 0 else "unknown"
+    else:
+        aggressor = "sell" if bid_vol > 0 else "unknown"
+    return Tick(ts=ts, price=close * price_scale, volume=total_vol, aggressor=aggressor)
+
+
+def _load_scid_ticks(path: Path) -> list:
+    """Parse an ENTIRE Sierra Chart .scid file into Ticks.
+
+    Only safe for small files -- this buffers every record as a Tick object
+    in memory. A single actively-traded futures contract can be tens of
+    millions of records (e.g. ~51M for the MNQU6 contract this was validated
+    against); for anything that size use iter_scid_ticks_for_day() instead,
+    which binary-searches to the target day instead of reading the whole file.
     """
+    price_scale = _price_scale()
     ticks = []
     with open(path, "rb") as f:
-        header_size = struct.unpack("<I", f.read(4))[0]
+        header_size, record_size = _read_scid_header(f)
         f.seek(header_size)
         while True:
-            chunk = f.read(_SCID_RECORD_SIZE)
-            if len(chunk) < _SCID_RECORD_SIZE:
+            chunk = f.read(record_size)
+            if len(chunk) < record_size:
                 break
-            raw_dt, _o, _h, _l, close, _num_trades, total_vol, bid_vol, ask_vol = \
-                struct.unpack(_SCID_RECORD_FMT, chunk)
-            ts = _scdatetime_to_et(raw_dt)
-            if ask_vol >= bid_vol:
-                aggressor = "buy" if ask_vol > 0 else "unknown"
-            else:
-                aggressor = "sell" if bid_vol > 0 else "unknown"
-            ticks.append(Tick(ts=ts, price=close, volume=total_vol, aggressor=aggressor))
+            ticks.append(_record_to_tick(chunk, price_scale))
+    return _dedupe_sort(ticks)
+
+
+def _record_ts_at(f, header_size: int, record_size: int, idx: int) -> datetime:
+    f.seek(header_size + idx * record_size)
+    raw_micros = struct.unpack("<q", f.read(8))[0]
+    return _scdatetime_to_et(raw_micros)
+
+
+def _bisect_day_start(f, header_size: int, record_size: int, n_records: int, target_date) -> int:
+    """First record index whose ET date is >= target_date (records are
+    append-only / time-sorted, so this is a valid binary search)."""
+    lo, hi = 0, n_records
+    while lo < hi:
+        mid = (lo + hi) // 2
+        if _record_ts_at(f, header_size, record_size, mid).date() < target_date:
+            lo = mid + 1
+        else:
+            hi = mid
+    return lo
+
+
+def iter_scid_ticks_for_day(path, target_date, price_scale: Optional[float] = None) -> list:
+    """Extract just one ET calendar date's ticks from a large .scid file.
+
+    Binary-searches the (time-sorted) record array for the day's start/end
+    byte offsets instead of reading the whole file -- the only practical way
+    to pull a single day out of a multi-GB, tens-of-millions-of-records
+    contract file. Returns a deduplicated, time-sorted list (safe to buffer
+    for a single day's volume; do not use this pattern across a multi-month
+    range without re-adding true streaming).
+    """
+    if price_scale is None:
+        price_scale = _price_scale()
+    with open(path, "rb") as f:
+        header_size, record_size = _read_scid_header(f)
+        n_records = (os.path.getsize(path) - header_size) // record_size
+
+        start_idx = _bisect_day_start(f, header_size, record_size, n_records, target_date)
+        end_idx = _bisect_day_start(f, header_size, record_size, n_records,
+                                     target_date + timedelta(days=1))
+
+        f.seek(header_size + start_idx * record_size)
+        ticks = []
+        for _ in range(end_idx - start_idx):
+            chunk = f.read(record_size)
+            if len(chunk) < record_size:
+                break
+            ticks.append(_record_to_tick(chunk, price_scale))
     return _dedupe_sort(ticks)
 
 

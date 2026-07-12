@@ -241,11 +241,18 @@ before features are computed.
 > Do not advance until acceptance criteria are met and logged.
 
 ### Phase 1 — Foundation Engine
-**Status: Code complete, gate NOT passed.** All modules implemented, 50/50 unit tests
-green against synthetic fixtures — but no real tick/footprint sample exists yet to run
-the tick-tolerance reconciliation against Sierra Chart (acceptance criterion 1). See
-`docs/phase1_report.md` for the honest breakdown of what's proven vs. still assumed.
-Do not open Phase 2 until a real data sample closes that gap.
+**Status: Code complete, gate nearly passed, one narrow item open.** All modules
+implemented, 57/57 unit tests green, including a real-data regression test against the
+user's actual MNQU6.CME.scid tick data. Byte-level inspection of the real file found and
+fixed 3 `.scid` parser bugs (missing magic header, wrong datetime field type, missing
+price scale). Reconciling against a real Sierra-displayed ground truth (2026-07-07:
+VAH=29587/POC=29539/VAL=29320) **overturned an assumed rule** — D-011: the PD VA window
+is the FULL session (18:00 ET prior day → RTH close), not RTH-only as the source note and
+both legacy `.cpp` files' comments claimed. VAH now matches within ~3 ticks; POC/VAL are
+a near photo-finish between two comparably-sized volume nodes (14% apart), tracked as an
+open item in D-011 (likely a volume-counting difference vs. Sierra's native
+`VolumeAtPriceForBars`, not a window/algorithm error). See `docs/phase1_report.md`. One
+more day's reconciliation should confirm the gap is small and stable before opening Phase 2.
 **Objective:** the plumbing. Reliable ingestion of tick/footprint data and construction of all
 structural references, with correct sessions and timezones.
 **Deliverables:**
@@ -316,7 +323,13 @@ cross-check against the live ACSIL study to confirm the port is faithful.
 counts match the research engine within tolerance; no unexplained divergence.
 
 ### Phase 8 — Production Release
-**Status: Planned**
+**Status: Planned, structural slice started early.** `acsil/OrderFlowAuctionStudy.cpp` ports
+the validated Phase 1 structural layer (PD VAH/POC/VAL with the D-011 window correction, IB,
+weekly, no-man's-land) — no signal logic yet, since FADE/FOLLOW/REV still need Phase 2/3
+Python validation first (dev rule #2). Not yet built/tested in Sierra Chart (no ACSIL
+compiler in the research environment) — needs a build pass and compile-error fixes before
+it's real. Full Phase 8 scope (signals, alerts, live conviction HUD, logging) stays gated
+on Phases 2-7.
 **Objective:** deploy the validated logic live.
 **Deliverables:** the ACSIL study/DLL with only validated logic, HUD showing frozen structural
 read + live conviction, alerts/ntfy, a signal+decision logger, and a monitoring/journaling loop

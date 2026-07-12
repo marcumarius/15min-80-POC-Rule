@@ -11,3 +11,5 @@ venv/
 .DS_Store
 .ipynb_checkpoints/
 /validation/output/
+.claude/scheduled_tasks.lock
+/depth/

@@ -1,13 +1,46 @@
-# ACSIL (Sierra Chart live study) — Phase 8
+# ACSIL (Sierra Chart live study)
 
 The C++ study/DLL that faithfully executes ONLY validated logic on the live feed.
 The study is an executor, not a place to invent signals.
 
+## `OrderFlowAuctionStudy.cpp` — current, in progress
+
+The ground-up rebuild's live study. **Structural layer only** (PD VAH/POC/VAL, Initial
+Balance, weekly VPOC/PWH/PWL, no-man's-land readout) — deliberately contains **no**
+FADE/FOLLOW/REV signal logic yet, per CLAUDE.md dev rule #2 ("a trigger is not written
+into ACSIL until it is validated in Python"). Mirrors `structure/levels.py` +
+`structure/value_area.py` + `structure/sessions.py`; if the two diverge, Python
+(backtested, unit-tested) is authoritative.
+
+Implements the **D-011 window correction** (`docs/decisions.md`): prior-day value area is
+built from the FULL 18:00-ET-anchored session (Asia+UK+US), not RTH-only as the legacy
+study and its accompanying note originally claimed — that RTH-only assumption was tested
+against a real chart reading and falsified. Initial Balance and RTH open/high/low/close
+are still tracked separately from RTH bars only, since IB is inherently an RTH concept.
+
+**Not yet built/tested in Sierra Chart** — written and reasoned through against the
+legacy files' proven ACSIL patterns, but there's no ACSIL compiler in the research
+environment. Build it in `ACS_Source`, report any compile errors back for a fix.
+
+**Not yet done:** weekly VPOC has NOT been re-validated under the D-011 full-session
+pattern (still RTH-only, matching the legacy study, flagged in the file's comments as an
+open question). Signal logic (FADE/FOLLOW/REV) is Phase 2/3 territory — Python first.
+
 ## `legacy/`
 
-`legacy/PriorDayNY_ValueArea_80PctRule.cpp` is the **pre-rebuild** study — the actual
-time-based-trigger implementation that Decision D-007 (`docs/decisions.md`) replaces.
-Kept for reference only; not built or ported as-is. Notable pieces:
+Two versions of the **pre-rebuild** study — the actual time-based-trigger implementation
+that Decision D-007 (`docs/decisions.md`) replaces. Kept for reference only; not built or
+ported as-is.
+
+- `PriorDayNY_ValueArea_80PctRule.cpp` — the fuller-featured version (includes the
+  no-man's-land `ProxFlag`/`ProxMaxATR` filter, D-004's origin).
+- `15MIN_80%Rule_IBV.cpp` — an earlier/different snapshot, missing the no-man's-land
+  filter but otherwise identical PD VAH/POC/VAL mechanism (`ComputeProfile`, RTH-session
+  filter, Pass 1/Pass 2 structure) — cross-checked against the first file and the user's
+  `How the PDVAHPOCVOL is generated.txt` note during the D-011 investigation; both `.cpp`
+  files agree with each other (and were both superseded by real-data reconciliation, D-011).
+
+Notable pieces, from the fuller file:
 
 - FADE/FOLLOW trigger (`PriorDayNY_ValueArea_80PctRule.cpp:629-638`): a consecutive-close
   streak counter (`cIn`/`cAb`/`cBe`) on a chart hardcoded to 30-minute bars (line 4). The

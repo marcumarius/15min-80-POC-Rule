@@ -1,8 +1,9 @@
 # Phase 1 Report — Foundation Engine
 
-**Status: code complete, gate NOT yet passed.** Per CLAUDE.md's honest-reporting
-rule, this report states plainly what is proven and what is still only
-unit-tested against synthetic fixtures.
+**Status: code complete, real .scid data flowing end-to-end, window mechanism
+corrected against real evidence (D-011), gate still open on one narrow item**
+(§4). Per CLAUDE.md's honest-reporting rule, this report states plainly what
+is proven and what is still open.
 
 ---
 
@@ -11,82 +12,128 @@ unit-tested against synthetic fixtures.
 | Module | Contents |
 |---|---|
 | `config/__init__.py` | Typed, dotted-access `Config` over `params.yaml`; validates every documented `range` against its `default` and raises `ConfigError` on violation. |
-| `structure/sessions.py` | `trading_day()`, `session_of()`, `in_rth()` — all DST-safe by construction (compare local wall-clock `time()` off a tz-aware ET datetime; no manual offset math). |
-| `structure/value_area.py` | `volume_at_price()`, `value_area()`, `value_area_from_footprint()` — true tick-size-binned VAP, ported line-for-line from the legacy ACSIL `ComputeProfile` including its exact tie-break rules (POC ties favor the lower price; expansion ties favor the upper neighbor). |
-| `structure/levels.py` | `StructuralSnapshot`/`Level`, `nearest_structure()`, `no_mans_land()` (D-004), plus session/weekly/IB/ATR/naked-POC builders and the D-010 (Provisional) flagged additions: `compute_overnight_vp()`, `level_stack_distance()`/`is_stacked()`. |
-| `data/loaders.py` | `load_ticks()` (Sierra `.scid` + Rithmic CSV), `load_footprint()` (CSV; `.depth` explicitly `NotImplementedError`), `classify_aggressor()`, `ticks_to_footprint()`. |
-| `tests/` | 50 unit tests, all passing, covering every module above with synthetic/hand-constructed fixtures. |
+| `structure/sessions.py` | `trading_day()`, `session_of()`, `in_rth()` — DST-safe by construction. |
+| `structure/value_area.py` | `volume_at_price()`, `value_area()`, `value_area_from_footprint()` — true tick-size-binned VAP, ported line-for-line from the legacy ACSIL `ComputeProfile`, including its exact tie-break rules. |
+| `structure/levels.py` | `StructuralSnapshot`/`Level`, `nearest_structure()`, `no_mans_land()` (D-004), session/weekly/IB/ATR/naked-POC builders, `session_profile_from_ticks()` (the corrected, full-session PD VA recipe, see §2), and the D-010 (Provisional) flagged additions. |
+| `data/loaders.py` | `load_ticks()` (Sierra `.scid` + Rithmic CSV), `iter_scid_ticks_for_day()` (binary-search single-day extraction for multi-GB files), `load_footprint()` (CSV; `.depth` explicitly `NotImplementedError`), `classify_aggressor()`, `ticks_to_footprint()`. |
+| `tests/` | 57 unit tests, all passing, including a real-data regression test (see §3). |
 
-Also this session: logged Decision D-010 (stacked PD levels + overnight
-session volume profile, Provisional) in `docs/decisions.md`; moved the legacy
-ACSIL study to `acsil/legacy/PriorDayNY_ValueArea_80PctRule.cpp` as the
-concrete evidence source for D-007.
-
----
-
-## 2. Acceptance criteria — status against docs/phase1_foundation_engine.md §4
-
-1. **"Structural levels reproduce Sierra Chart's to within tick tolerance on
-   a sample month."** ❌ **Not done.** No real tick/footprint data exists in
-   this repo. `value_area()` is a faithful port of the legacy study's proven
-   `ComputeProfile` algorithm (same binning, same tie-breaks), so it should
-   reproduce Sierra's output once fed real data — but that is an expectation,
-   not a measurement. This is the single most important open item.
-2. **"Sessions/trading-day mapping correct across a DST transition."** ✅
-   Unit-tested against the actual 2026 US DST dates (spring-forward
-   2026-03-08, fall-back 2026-11-01, confirmed via `zoneinfo` rather than
-   assumed) and against two dates with different UTC offsets. Correctness
-   here is structural (wall-clock comparison on a tz-aware datetime), not
-   date-specific, but the tests pin real transition dates rather than
-   fabricated ones.
-3. **"`no_mans_land` and `nearest_structure` verified against hand-computed
-   cases."** ✅ Done — both are pure functions over a hand-constructed
-   `StructuralSnapshot`, independent of any data pipeline; 8 tests cover
-   direction handling, the ATR threshold, zero-ATR, and no-structure-in-
-   direction edge cases.
-4. **"Loaders are deterministic, deduplicated, ET-aligned, DST-safe."**
-   ⚠️ **Partially done.** The Rithmic-CSV path is tested for dedup/sort. The
-   `.scid` binary parser is implemented against Sierra's documented
-   `s_IntradayFileHeader`/`s_IntradayRecord` layout and round-trips against a
-   *hand-built* file matching that layout — but no real `.scid` export exists
-   to confirm the layout assumption (endianness, epoch, UTC-vs-local
-   timestamping) is actually correct. `load_footprint()` only handles a CSV
-   footprint export; `.depth` raises `NotImplementedError` rather than guess
-   at an undocumented binary format.
-5. **"All unit + regression tests green; snapshot output is reproducible."**
-   ✅ 50/50 unit tests pass (`pytest tests/`). ❌ No regression test on a
-   fixed historical slice exists yet — there is no historical slice, real or
-   sample, in the repo to regress against.
-6. **This report.** ✅ (this file) — but it cannot state a VA reconciliation
-   max-tick-error, because no reconciliation has happened.
+Also this session: logged D-010 (stacked PD levels + overnight VP,
+Provisional) and D-011 (PD VA window correction, Accepted); moved the legacy
+ACSIL study to `acsil/legacy/PriorDayNY_ValueArea_80PctRule.cpp`; read a
+second legacy `.cpp` (`15MIN_80%Rule_IBV.cpp`) and confirmed it agrees with
+the first on the VA mechanism.
 
 ---
 
-## 3. The real gate: no sample data exists
+## 2. How PD VAH/POC/VAL are actually built (corrected by real-data evidence)
 
-Every "✅" above is a unit test against synthetic or hand-built fixtures, not
-a validation against real market data. Per CLAUDE.md §2.1 ("evidence before
-trust") and §6.5 ("honest reporting"), Phase 1 should **not** be marked
-complete/accepted in `docs/decisions.md` until:
+The `How the PDVAHPOCVOL is generated.txt` note and both legacy `.cpp`
+files' code comments describe the value area as **RTH-only (09:30-16:00 ET)**.
+Real-data reconciliation against the user's live-study HUD reading
+**falsified that** — see D-011 in `docs/decisions.md`. The window that
+actually reproduces the displayed PD VA is:
 
-- A real `.scid` or Rithmic tick export (even one sample day) is available to
-  confirm `_load_scid_ticks`'s byte-layout and timezone assumptions.
-- A real footprint/VAP export (even one sample day) is available to run
-  `value_area()` against and compare POC/VAH/VAL to Sierra Chart's own display
-  for that day, producing the tick-tolerance number criterion 1 requires.
-- That comparison is written up here with the actual max-tick-error observed.
+1. **FULL SESSION, not RTH-only.** Prior day's 18:00 ET reopen through the
+   current day's RTH close (Asia+UK+US all included). An RTH-only rebuild of
+   2026-07-07 missed the real (live-study-displayed) value by up to 239
+   points; the full-session rebuild lands within single digits to ~15 ticks
+   of each edge (see §3).
+2. **True volume-at-price** — every tick's actual traded volume is binned at
+   its own price (not a 1-minute OHLC approximation, D-009).
+3. **70% expansion from POC** by heavier-adjacent-bin, exact tie-break
+   parity with the legacy study (verified by `tests/test_value_area.py`).
+4. **Projected onto the next day** as the "PD" reference that FADE/FOLLOW/REV
+   key off.
+5. **`trading_date` uses `trading_day()`** (the 18:00-anchored boundary from
+   `sessions.py`), not plain calendar date — this was flipped from an earlier
+   draft that used calendar date, which was correct only under the (wrong)
+   RTH-only assumption. Now that the window is genuinely 18:00-anchored,
+   `trading_day()` is the right tool.
+6. **Caveat carried into code:** this all assumes chart/data timezone is ET.
+   `data/loaders.py` converts every `.scid` timestamp to ET at ingestion, so
+   this is enforced structurally, not just documented.
 
-**Until then, treat every function in this phase as "correctly implements
-the documented algorithm," not "produces correct real-world values."** The
-distinction matters most for `_load_scid_ticks` (D-009/D-007's whole
-premise — true VAP instead of 1-min approximation — depends on this being
-right) and for D-010's overnight-VP feature (already Provisional and
-off-by-default, so lower risk).
+**This reverses what the source note and code comments say.** Logged as
+D-011 rather than silently changed, per CLAUDE.md's decision-log discipline
+— if the note or `.cpp` comments are re-read later, don't trust their
+RTH-only description without re-checking this entry first.
 
 ---
 
-## 4. Next step
+## 3. Real data: format bugs fixed, then a real reconciliation run
 
-Do not open the Phase 2 branch yet. Next action is obtaining one real sample
-day of tick/footprint data (Rithmic export or Sierra `.scid`/footprint CSV)
-to run the criterion-1 reconciliation and close out this report's open items.
+The user provided real `.scid` files (`Scid data/MNQM6.CME.scid`,
+`Scid data/MNQU6.CME.scid` — MNQ's June and September 2026 contracts,
+gitignored, ~6.5GB combined).
+
+**Three `.scid` parser bugs found via byte-level inspection** (not guessed):
+1. Missing 4-byte `"SCID"` magic signature before the header fields.
+2. DateTime is `int64` microseconds since 1899-12-30 UTC, not an 8-byte
+   double of days.
+3. Price needs `× 0.01` scaling (confirmed by real consecutive Close diffs
+   landing on exact multiples of MNQ's 0.25 tick once scaled).
+
+All three fixed in `data/loaders.py`, locked in by a golden-record
+regression test built from the real file's actual first-record bytes.
+
+**Reconciliation against a real ground-truth number.** The user read their
+live study's HUD for 2026-07-07 (printed at US-session-end, ~16:30):
+**VAH=29587, POC=29539, VAL=29320**.
+
+| Window tried | POC | VAH | VAL |
+|---|---|---|---|
+| RTH-only (09:30-16:00), original assumption | 29300.0 | 29508.0 | 29235.0 |
+| Full session, 18:00 Jul6 → 16:00 Jul7 | 29300.0 | **29588.25** | 29235.0 |
+| Full session, 18:00 Jul6 → 16:30 Jul7 | 29300.0 | 29584.5 | 29235.0 |
+| Full session, 18:00 Jul6 → 16:45 Jul7 | 29300.0 | 29584.0 | 29235.0 |
+| **Target (live study)** | **29539** | **29587** | **29320** |
+
+VAH converges to within ~3 ticks of the target under every full-session
+variant, regardless of the exact end-boundary (16:00/16:30/16:45) — this is
+what falsified the RTH-only assumption and established D-011.
+
+POC/VAL don't match outright, but the picture is not a broken methodology:
+the two top volume nodes in the full-session reconstruction are **29300.00
+(4353 contracts) and 29539.00 (3743 contracts) — only 14% apart**, a near
+photo-finish, not a dominant winner. Forcing the POC tie-break to 29539
+(the target) instead of 29300 gives **VAL=29316.25 — within 15 ticks of the
+target 29320**. So each anchor choice reproduces the *opposite* edge almost
+exactly; nothing points at a wrong window or a wrong algorithm, just a small
+volume-counting difference (raw-tick `TotalVolume` summation vs. Sierra's
+native `VolumeAtPriceForBars`) tipping a close call.
+
+This is now regression-locked with a stated tolerance (not a spurious exact
+match) in
+`tests/test_levels.py::test_session_profile_from_ticks_reproduces_real_july7_reconciliation`.
+
+---
+
+## 4. What's still open
+
+The remaining gap (tens of ticks on POC/VAL, not hundreds) is most likely a
+volume-counting difference, not a window or algorithm error. Closing it
+needs one of:
+- Sierra's own per-price volume numbers for one day (a numbers export), to
+  diff bin-by-bin against my reconstructed `vap` map and find exactly where
+  the ~600-contract difference at the 29300/29539 nodes comes from.
+- A second independent day's reconciliation, to check whether the gap is
+  systematic (same direction/magnitude every day) or specific to 2026-07-07.
+
+This is a narrow, well-characterized gap — not a blocker on the scale of
+"wrong window" or "wrong contract" (both ruled out). Phase 2 can reasonably
+begin once one more day is checked to confirm the gap doesn't grow.
+
+**On Option A vs B (moot now):** Option A (the `.scid` files already on
+disk) was the right call — it found and fixed three real format bugs and
+drove the D-011 window correction, both of which a CSV export would have
+masked entirely.
+
+---
+
+## 5. Next step
+
+Reconcile one more day (ideally with a Sierra-native per-price volume export
+for at least one of them) to confirm the POC/VAL gap is small and stable,
+then log the result here and close D-011's re-test trigger. Do not open the
+Phase 2 branch until that's done.

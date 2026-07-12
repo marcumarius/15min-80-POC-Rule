@@ -1,0 +1,14 @@
+How the prior-day POC / VAH / VAL are built
+Time window covered: US Regular Trading Hours only — 09:30 to 16:00 ET. NOT the 24-hour session.
+The mechanism, straight from the code:
+The session filter (line 422) is the key line:
+cppif (secs < sessStartSec || secs >= sessEndSec) continue;
+Every bar whose time-of-day falls outside [SessionStart, SessionEnd) is skipped before any volume is accumulated. Those bounds come from inputs 0 and 1, which default to 09:30:00 and 16:00:00 chart time (lines 285–286: In_SessionStart = HMS_TIME(9,30,0), In_SessionEnd = HMS_TIME(16,0,0)). So the overnight/Globex session (16:00→09:30) contributes nothing to the value area.
+The profile is true volume-at-price (lines 459–463): for each RTH bar it pulls Sierra's actual VolumeAtPriceForBars (per-price traded volume) and accumulates it into a vap map keyed by price-in-ticks. This is real VAP, not a 1-minute approximation — good.
+The value area is the 70% expansion (vaFraction = input 2 / 100, default 70%, line 287/394): ComputeProfile finds the POC (highest-volume price) and expands up/down by heavier adjacent bins until 70% of session volume is enclosed → that gives VAH and VAL.
+"Prior day" projection (Pass 2, line 541): each completed RTH session's POC/VAH/VAL is stored, and the study "projects the prior session's value area onto the next day" — so today's chart shows yesterday's RTH value area as the reference (ref.POC/VAH/VAL) that FADE/FOLLOW/REV key off.
+Two critical caveats for the handover
+1. It depends on "chart time" being ET. The filter uses GetTimeInSeconds() (time-of-day in the chart's timezone) against 09:30/16:00. If the chart is not set to US Eastern, the 09:30–16:00 window slices the wrong hours and the entire value area is garbage. This must be a Phase 1 acceptance check in the rebuild — the study assumes chart TZ = ET.
+2. "Day" is a calendar-date bucket, not an 18:00-anchored trading day. The daily key (line 425) is year/month/day of the bar. Because only 09:30–16:00 bars survive the filter, an RTH session never spans midnight, so the calendar-date bucketing is safe here — but note it's different from the 18:00-ET trading-day boundary used elsewhere (VWAP/CVD anchoring). Don't conflate the two in the rebuild: value area = RTH calendar day; VWAP/CVD = 18:00-anchored trading day.
+For the rebuild spec
+This maps cleanly to what's already in the new repo — config/params.yaml has session_start: "09:30" / session_end: "16:00" and va_percent: 0.70, and the Phase 1 spec's value_area.py acceptance test ("reproduce Sierra Chart VA within tick tolerance") is exactly this logic. I'll add an explicit note to the Phase 1 spec pinning down: RTH-only (09:30–16:00 ET), true VAP, 70%, projected as prior-day reference, chart-TZ-must-be-ET, so it's unambiguous. Want me to add that clarification to docs/phase1_foundation_engine.md and re-zip?

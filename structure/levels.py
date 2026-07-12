@@ -15,7 +15,7 @@ from typing import Iterable, Optional
 
 from config import load_config
 from data.types import Level
-from structure.sessions import session_of
+from structure.sessions import session_of, trading_day
 from structure.value_area import value_area, volume_at_price
 
 _cfg = load_config()
@@ -95,6 +95,51 @@ def compute_session_profile(bars: list, cells: Iterable, tick_size: float,
         high=max(b["high"] for b in bars),
         low=min(b["low"] for b in bars),
         close=bars[-1]["close"],
+        poc=va["poc"], vah=va["vah"], val=va["val"],
+    )
+
+
+def session_profile_from_ticks(ticks: list, tick_size: float,
+                                va_percent: float = 0.70) -> Optional[SessionProfile]:
+    """Build a SessionProfile directly from raw ticks (no bar aggregation step)
+    -- the PD VAH/POC/VAL recipe, corrected by real-data reconciliation
+    (D-011, docs/decisions.md) against the "How the PDVAHPOCVOL is generated.txt"
+    note and both legacy `.cpp` files' code comments:
+
+    1. FULL SESSION, NOT RTH-ONLY. The caller must pass ticks spanning the
+       prior day's 18:00 ET reopen through the current day's RTH close
+       (Asia+UK+US) -- e.g. `trading_day(t.ts) == target_date` on every
+       tick, using sessions.trading_day(), NOT in_rth(). D-011 found the
+       RTH-only description in the source note and the `.cpp` comments does
+       not match what the live study's chart-displayed PD VA actually
+       reflects: an RTH-only rebuild missed the real value by up to 239
+       points; the full-session rebuild landed within single-digit ticks on
+       one edge and ~15 ticks on the other. This is a correction, logged
+       because the original note/code comments said the opposite -- do not
+       revert to RTH-only filtering here without new evidence.
+    2. `trading_date` is `trading_day(ticks[-1].ts)` (the 18:00-anchored
+       trading day, from sessions.py) -- NOT plain calendar date. Now that
+       the window is genuinely 18:00-anchored, trading_day() is the correct
+       tool; using raw `.date()` on a tick from the prior evening would
+       mislabel the session.
+    3. True per-price volume-at-price (not a 1-minute approximation, D-009)
+       -- every tick's full volume is binned at its own price.
+    """
+    if not ticks:
+        return None
+    vap: dict = {}
+    for t in ticks:
+        k = round(t.price / tick_size)
+        vap[k] = vap.get(k, 0) + t.volume
+    va = value_area(vap, tick_size, va_percent)
+    return SessionProfile(
+        trading_date=trading_day(ticks[-1].ts),
+        start_ts=ticks[0].ts,
+        end_ts=ticks[-1].ts,
+        open=ticks[0].price,
+        high=max(t.price for t in ticks),
+        low=min(t.price for t in ticks),
+        close=ticks[-1].price,
         poc=va["poc"], vah=va["vah"], val=va["val"],
     )
 

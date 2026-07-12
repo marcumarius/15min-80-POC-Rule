@@ -25,3 +25,19 @@ class Level:
     name: str
     price: float
     kind: str               # "va" | "ib" | "weekly" | "session" | "vwap" | "overnight_vp"
+
+@dataclass
+class Bar:
+    """Derived, for context/plotting and order-flow feature input only --
+    never a trigger itself (CLAUDE.md D-007). bid_volume/ask_volume are the
+    aggressor-classified split feeding absorption/exhaustion/imbalance;
+    delta = ask_volume - bid_volume."""
+    ts: datetime             # bar start, tz-aware ET
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: int              # total, including unclassified ("unknown" aggressor) ticks
+    bid_volume: int
+    ask_volume: int
+    delta: int                # ask_volume - bid_volume

@@ -107,6 +107,13 @@ Level: name: str, price: float, kind: {va, ib, weekly, session, vwap}
   adjacent bin, ties favor the lower price on POC selection and the upper bin on expansion —
   mirrors the legacy `ComputeProfile` tie-breaking exactly). This is the true-VAP fix from
   D-009. `volume_at_price(cells, tick_size) -> vap` builds the input map from footprint cells.
+  **Window (D-011, corrects an earlier RTH-only assumption):** despite both legacy `.cpp`
+  files' code comments and the source `.txt` note describing PD VAH/POC/VAL as built from
+  09:30-16:00 ET only, real-data reconciliation against the live study's own displayed values
+  falsified that — the window that actually reproduces the displayed PD VA is the **full
+  18:00-anchored session** (prior day 18:00 ET reopen through current-day RTH close,
+  Asia+UK+US). See `structure/levels.py::session_profile_from_ticks()` and D-011 for the
+  evidence; feed it the full session, not `in_rth()`-filtered ticks.
 - **Acceptance:** on a sample month, VAH/POC/VAL match Sierra Chart's VA study within tick
   tolerance. This is the single most important acceptance test in Phase 1.
 
