@@ -181,12 +181,117 @@ test. Results:
 - Full-year coverage now on disk: Jul 2025 → Jul 2026 across H26/M6/U6, and
   the six Jan depth days now have same-contract tape (book+tape lab ready).
 
+## 800-trade-bar batch (all three periods): honest mixed result
+
+Same engine, same untuned params, bars switched from 1-min to 800-trade
+(with footprint stack summaries + calibrated absorption now firing):
+
+| Family | H26 front | M6 front | U6 |
+|---|---|---|---|
+| FADE | +0.089R (n=53) | +0.154R (n=51) | +0.053R (n=16) |
+| FOLLOW | −0.103R (n=70) | +0.025R (n=66) | −0.284R (n=20) |
+| FOLLOW+stack | −0.192R (n=26) | −0.163R (n=21) | (n=2) |
+
+Findings, stated plainly:
+1. **FADE is positive in all three periods on BOTH bar bases** — six
+   period×bar-basis cells, all green. That is now the single most robust
+   result in the project: the order-flow 80%-rule fade carries the edge.
+2. **The bar switch did NOT improve economics as-parameterized** — engine
+   params (divergence lookback=5 bars, acceptance z, feature lookback=20)
+   were implicitly horizon-tuned to minute bars; on 800t bars those windows
+   mean ~5x shorter horizons. Trade bars remain the right substrate for
+   FEATURES (absorption exists only there — 14-18 absorption events now
+   appear in FADE evidence), but the SIGNAL engine needs per-bar-basis
+   horizon rescaling before comparing again.
+3. **Stacked-imbalance-as-FOLLOW-confirmation is FALSIFIED** — negative in
+   both large samples (−0.19R, −0.16R vs no-stack −0.05R/+0.11R). Visible
+   aggressive stacking at the acceptance point marks the late crowd, not
+   institutional initiative — consistent with the trapped-traders concept.
+   If anything the signal may invert (stack at the edge = fade fuel);
+   re-test as a FADE-side input, not a FOLLOW confirmer.
+
+## L0 day-type classifier v1: DOES NOT DISCRIMINATE (negative result)
+
+Built `structure/daytype.py` per MomentumTrade.md L0 (five conditions at IB
+completion: open drive, gap-holds, narrow IB, value migration, prior close
+on extreme; score 0-5, no hindsight). Split all minute-bar engine signals by
+score across the three periods. Combined result: FOLLOW +0.115R on score>=2
+vs +0.113R on score<=1 — statistically identical; FADE +0.168R vs +0.133R —
+no meaningful split; per-period directions inconsistent (H26 FADE prefers
+LOW scores, M6 HIGH, U6 LOW). **These five proxies, as implemented, carry no
+regime information for these signals.** Do not gate anything on this score.
+Next iteration must test conditions INDIVIDUALLY (gap-holds is the most
+theoretically defensible; narrow-IB-means-breakout is folklore) and consider
+that the signal engine already implicitly conditions on similar facts.
+
+Useful byproduct: the combined 9-month minute-bar baseline is positive for
+BOTH families — FOLLOW +0.11R (n=149), FADE +0.15R (n=107), costs included.
+
+## MOMO (buy-the-pullback, MomentumTrade.md L2-L4) vs FOLLOW (buy-the-break)
+
+Built `signals/momentum.py`: acceptance arming → windowed L3 vetoes
+(absorption/divergence/exhaustion against the move, from the break onward)
+→ pullback that holds beyond the edge without extending → resumption
+trigger, stop = the pullback extreme (structural, per L6). A real
+pullback-detection bug (extreme updated with the current bar before the dip
+check, making every bar a "pullback") was caught by the unit tests and
+fixed; results below are the corrected engine, and the verdict was the same
+both before and after the fix — it is not an artifact of the bug.
+
+| Period | MOMO | FOLLOW |
+|---|---|---|
+| H26 front (chop) | **+0.078R** (n=23) | −0.040R (n=62) |
+| M6 front (trend) | −0.243R (n=21) | **+0.278R** (n=61) |
+| U6 | −0.063R (n=5) | +0.100R (n=26) |
+| COMBINED | −0.074R (n=49) | **+0.115R** (n=149) |
+
+**Verdict, stated plainly: buy-the-pullback does NOT beat buy-the-break
+overall as parameterized — MomentumTrade.md's L4 claim fails the combined
+test.** But the split is meaningful: MOMO wins exactly where FOLLOW loses
+(the choppy H26 regime, where breaks fail and demanding a pullback-hold
+filters the traps) and loses exactly where FOLLOW wins (the M6 trend, where
+the best breaks never pull back — the doc's own "you will miss some big
+ones" caveat, measured). MOMO and FOLLOW are near-mirror regime complements,
+which is L0's job to arbitrate — and L0 v1 measured as non-discriminating.
+The regime classifier is now confirmed as the binding constraint of the
+whole momentum side. Until a regime read works, FOLLOW stays the baseline
+and MOMO stays a research branch (not shipped).
+
+## L0 autopsy (D-013) + the gated system: the fusion hierarchy works
+
+Per-condition autopsy found the blended score was summing opposing effects.
+Three rules replicate with consistent signs in all three periods:
+open_drive gates FOLLOW (+0.412R delta, +++), gap_holds vetoes FADE
+(−0.424R delta, −−−), narrow_ib is anti-trend folklore (−0.249R, −−−).
+Logged as D-013 (Provisional). The gated system (FOLLOW only on open-drive
+days; FADE except held-gap days), with the live no-hindsight conflict veto
+stacked:
+
+| | n | win% | PF | exp | totR | maxDD |
+|---|---|---|---|---|---|---|
+| Baseline ungated | 256 | 49.6 | 1.29 | +0.130R | +33.4 | 8.3R |
+| D-013 gated | 130 | 56.9 | 1.78 | +0.309R | **+40.1** | 6.1R |
+| Gated + live veto | 98 | 59.2 | 1.93 | **+0.352R** | +34.5 | **4.1R** |
+
+Structural coherence, not just aggregate lift: **all six gated period×family
+cells are positive**, including H26 gated FOLLOW (+0.327R) where ungated
+FOLLOW was negative — the gate rescues the momentum side in the regime that
+was killing it. And the live conflict veto, which was regime-dependent
+ungated (hurt in chop), now helps in ALL periods once gating runs first —
+the regime → structure → trigger → conflict ordering of D-002, measured.
+The gated system captures MORE total R than the baseline with HALF the
+trades and 27% less drawdown.
+
+**Caveat, unchanged:** discovered and measured on the same 9 months.
+Treat +0.31-0.35R as an in-sample upper bound; D-013 promotion still
+requires a fourth period (forward months or older data).
+
 ## Next steps (in order)
 
-1. Rebuild the feature pipeline on 800-trade bars + per-price footprint
-   (config `bar_trades`); re-run all three batches — absorption/exhaustion
-   expected to come alive on activity-normalized bars, and FADE (the robust
-   family) is the one absorption should strengthen most.
+1. Wire the D-013 gates + live veto into a single `fusion/` decision module
+   (Phase 5 skeleton) behind config flags, defaults off.
+2. Hybrid bars (minute engine + trade-bar absorption events as FADE evidence).
+3. Book+tape absorption lab (Jan depth days); IS/OOS on a fourth period.
 2. Independent-sample test of D-012 (older data or forward months) + proper
    IS/OOS split.
 3. Phase 5: fuse open-location regime + structure + trigger + conflict state

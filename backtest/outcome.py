@@ -57,16 +57,23 @@ def simulate_trade(signal, bars: list, atr: float, tick_size: float) -> TradeRes
     atr_floor = _cfg.management.runner_trail["atr_floor"]
 
     entry = signal.price + d * entry_slip
-    buffer = max(0.08 * atr, 8 * tick_size)
-    stop = signal.level - d * buffer
-    # cap at max_stop_atr x ATR: on gap days the structural edge can be
-    # hundreds of points away, distorting R (interim report issue 1) --
-    # take the TIGHTER of structural and ATR-capped.
-    atr_stop = entry - d * _cfg.management.max_stop_atr * atr
-    if d > 0:
-        stop = max(stop, atr_stop)
+    explicit_stop = getattr(signal, "stop", None)
+    if explicit_stop is not None:
+        # MOMO-style signals carry their own structural stop (the pullback
+        # extreme -- "the structure that must hold", MomentumTrade.md L6);
+        # a small buffer beyond it, min-stop floor still applies.
+        stop = explicit_stop - d * 2 * tick_size
     else:
-        stop = min(stop, atr_stop)
+        buffer = max(0.08 * atr, 8 * tick_size)
+        stop = signal.level - d * buffer
+        # cap at max_stop_atr x ATR: on gap days the structural edge can be
+        # hundreds of points away, distorting R (interim report issue 1) --
+        # take the TIGHTER of structural and ATR-capped.
+        atr_stop = entry - d * _cfg.management.max_stop_atr * atr
+        if d > 0:
+            stop = max(stop, atr_stop)
+        else:
+            stop = min(stop, atr_stop)
     if abs(entry - stop) < min_stop:
         stop = entry - d * min_stop
     risk = abs(entry - stop)

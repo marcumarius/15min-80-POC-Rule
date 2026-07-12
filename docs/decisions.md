@@ -216,6 +216,30 @@ when the move to order-flow triggers changes the signal set.
   an independent replication of the carried-forward "FADE is the strongest edge" prior
   (§3) on the new order-flow triggers.
 
+### D-013 — L0 per-condition autopsy: open-drive gates FOLLOW, holding gaps veto FADE
+- **Date:** 2026-07-12
+- **Status:** Provisional (flag-only; in-sample, same 9 months as the baseline)
+- **Evidence:** The blended 5-condition day-type score measured as pure noise (interim
+  report), but splitting by each condition INDIVIDUALLY, with per-period sign consistency
+  required across all three front-month periods (the standard that caught D-012):
+  1. **open_drive → FOLLOW**: +0.388R with (n=50) vs −0.024R without (n=99),
+     delta +0.412R, signs +++ (replicates in every period). Initiative from the bell is
+     the regime read the momentum side was missing.
+  2. **gap_holds → FADE veto**: −0.164R with (n=27) vs +0.259R without (n=80),
+     delta −0.424R, signs −−− (consistently destructive everywhere). A gap that holds
+     through the IB is out-of-balance conviction — fading it is fighting initiative.
+  3. **narrow_ib → FOLLOW veto**: −0.044R with vs +0.205R without, delta −0.249R,
+     signs −−−. The "narrow IB means breakout" folklore is INVERTED in this data.
+  Parked (inconsistent signs): prior_close_on_extreme (positive but +-+/++-),
+  value_migrated (weakly negative, mixed). The v1 score failed because it summed
+  opposing effects (open_drive + with narrow_ib −) into one number.
+- **Decision:** L0 v2 = three separate boolean rules, not a score: gate/upweight FOLLOW
+  on open-drive days; veto FADE on gap-holds days; never treat narrow IB as trend-capable
+  (candidate FOLLOW veto). Flag-only until measured as a combined gated system and,
+  ideally, on a fourth period.
+- **Re-test trigger:** forward months (U6 beyond Jul 10 / Z6) or older H26/Z25 data;
+  and re-measure after FADE gains absorption evidence (gap_holds n=27 is smallish).
+
 ---
 
 ## Ledger (quick index)
@@ -234,3 +258,4 @@ when the move to order-flow triggers changes the signal set.
 | D-010 | Stacked PD levels + overnight VP | Provisional |
 | D-011 | PD VA window is full session, not RTH-only | Accepted |
 | D-012 | Open-location regime gate (out-of-balance opens) | Provisional — FAILED OOS, do not promote |
+| D-013 | L0 v2: open-drive gates FOLLOW; holding gaps veto FADE | Provisional |
