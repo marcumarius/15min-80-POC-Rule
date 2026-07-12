@@ -204,6 +204,17 @@ when the move to order-flow triggers changes the signal set.
 - **Re-test trigger:** an independent sample (older data, or forward months), and a
   check that the inside-open negative isn't driven by the untuned absorption/exhaustion
   features (FADE currently keys almost entirely off CVD divergence).
+- **RE-TESTED 2026-07-12 — FAILED AND INVERTED OOS.** MNQH26 front-month
+  (Dec 19 2025 → Mar 20 2026, n=105, a genuinely non-overlapping sample in a different
+  macro regime): outside-open −0.020R (n=68) vs inside-open +0.148R (n=37) — the exact
+  opposite split. The gate was a regime artifact of the Mar-Jun trend, not a stable edge.
+  Keep the flag default-false and DO NOT promote; open-location may still be useful as a
+  Phase 5 *input* (it clearly carries regime information — its sign tracks the regime)
+  but never as a standalone filter. Same test found the durable pattern instead: **FADE
+  is positive in all three front-month periods** (H26 +0.182R n=42, M6 +0.195R n=41,
+  U6 +0.028R n=24) while FOLLOW flips sign with regime (−0.056R / +0.278R / +0.100R) —
+  an independent replication of the carried-forward "FADE is the strongest edge" prior
+  (§3) on the new order-flow triggers.
 
 ---
 
@@ -222,4 +233,4 @@ when the move to order-flow triggers changes the signal set.
 | D-009 | True VAP required | Accepted |
 | D-010 | Stacked PD levels + overnight VP | Provisional |
 | D-011 | PD VA window is full session, not RTH-only | Accepted |
-| D-012 | Open-location regime gate (out-of-balance opens) | Provisional |
+| D-012 | Open-location regime gate (out-of-balance opens) | Provisional — FAILED OOS, do not promote |

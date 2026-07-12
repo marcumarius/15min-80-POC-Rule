@@ -160,11 +160,33 @@ MNQH26 .scid (or use M6-trades days only) before building joint features.
 User also confirmed a preference for 800-trade bars (activity-based), which
 is the planned bar basis for the feature rebuild.
 
+## MNQH26 independent sample: D-012 falsified, FADE prior replicated
+
+User supplied the MNQH26 .scid (Jul 2025 → Mar 2026, 104M records). Its
+front-month window (Dec 19 → Mar 20, n=105 signals) overlaps NOTHING in the
+earlier batches and sits in a different macro regime — a true independent
+test. Results:
+
+- **D-012 INVERTED**: outside-open −0.020R vs inside-open +0.148R — the
+  exact opposite of both 2026 spring/summer periods. The open-location gate
+  was a regime artifact. Demoted in decisions.md; usable only as a Phase 5
+  regime *input*, never a standalone filter. (This is the process working:
+  flag-only per rule 10 meant nothing shipped wrong.)
+- **The durable pattern across all three front-month periods is the family
+  split**: FADE positive in ALL THREE (H26 +0.182R, M6 +0.195R, U6 +0.028R;
+  combined n=107) while FOLLOW flips sign with regime (−0.056R / +0.278R /
+  +0.100R). This independently replicates the carried-forward prior that
+  FADE (the 80% rule) is the strongest edge — now on order-flow triggers,
+  with costs, across ~9 months and three contracts.
+- Full-year coverage now on disk: Jul 2025 → Jul 2026 across H26/M6/U6, and
+  the six Jan depth days now have same-contract tape (book+tape lab ready).
+
 ## Next steps (in order)
 
 1. Rebuild the feature pipeline on 800-trade bars + per-price footprint
-   (config `bar_trades`); re-run the batch — absorption/exhaustion expected
-   to come alive on activity-normalized bars.
+   (config `bar_trades`); re-run all three batches — absorption/exhaustion
+   expected to come alive on activity-normalized bars, and FADE (the robust
+   family) is the one absorption should strengthen most.
 2. Independent-sample test of D-012 (older data or forward months) + proper
    IS/OOS split.
 3. Phase 5: fuse open-location regime + structure + trigger + conflict state

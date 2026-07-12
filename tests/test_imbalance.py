@@ -34,9 +34,16 @@ def test_detect_imbalances_flags_buy_diagonal():
 
 def test_detect_imbalances_zero_denominator_is_infinite_ratio():
     cells = [_cell(100.00, bid=0, ask=0), _cell(100.25, bid=0, ask=5)]
-    levels = detect_imbalances(cells, tick_size=0.25, ratio=3.0)
+    levels = detect_imbalances(cells, tick_size=0.25, ratio=3.0, min_volume=5)
     assert len(levels) == 1
     assert levels[0].price == 100.25 and levels[0].ratio == float("inf")
+
+
+def test_detect_imbalances_volume_floor_suppresses_sparse_levels():
+    # same shape but below the volume floor -> no imbalance (the noise case
+    # measured on real 800t bars: 1-lot levels vs empty diagonals)
+    cells = [_cell(100.00, bid=0, ask=0), _cell(100.25, bid=0, ask=5)]
+    assert detect_imbalances(cells, tick_size=0.25, ratio=3.0, min_volume=20) == []
 
 
 def test_detect_imbalances_no_data_at_adjacent_price_skips():

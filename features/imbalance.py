@@ -39,12 +39,15 @@ def _diagonal_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
-def detect_imbalances(cells: list, tick_size: float, ratio: Optional[float] = None) -> list:
+def detect_imbalances(cells: list, tick_size: float, ratio: Optional[float] = None,
+                       min_volume: Optional[float] = None) -> list:
     """`cells` must be the FootprintCells for ONE bar/bucket (same
     ts_bucket) -- one cell per price. Returns ImbalanceLevels sorted by
     price, ascending."""
     if ratio is None:
         ratio = _cfg.order_flow.imbalance_ratio
+    if min_volume is None:
+        min_volume = _cfg.order_flow.imbalance_min_volume
     by_price = {round(c.price / tick_size): c for c in cells}
 
     results = []
@@ -52,11 +55,11 @@ def detect_imbalances(cells: list, tick_size: float, ratio: Optional[float] = No
         cell = by_price[tks]
         below = by_price.get(tks - 1)
         above = by_price.get(tks + 1)
-        if below is not None:
+        if below is not None and cell.ask_volume >= min_volume:
             r = _diagonal_ratio(cell.ask_volume, below.bid_volume)
             if r >= ratio:
                 results.append(ImbalanceLevel(cell.price, r, "buy"))
-        if above is not None:
+        if above is not None and cell.bid_volume >= min_volume:
             r = _diagonal_ratio(cell.bid_volume, above.ask_volume)
             if r >= ratio:
                 results.append(ImbalanceLevel(cell.price, r, "sell"))

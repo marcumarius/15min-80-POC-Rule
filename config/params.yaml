@@ -78,6 +78,15 @@ structural:
 # These REPLACE the old time-based triggers (see Decision D-007).
 # ─────────────────────────────────────────────────────────────────────────────
 order_flow:
+  bar_trades:
+    default: 800            # trades per bar for order-flow feature bars
+    range: [200, 2000]
+    rationale: >
+      activity-based bars (D-007 applied to the bar itself): every bar is the
+      same amount of participation, so delta/range relationships are
+      comparable across quiet and violent periods. 800 is the user's live
+      charting preference; 1-min bars were measured unusable for absorption.
+
   # --- Delta / CVD divergence ---
   delta_div_lookback:
     default: 5              # swings/bars compared for price-vs-delta divergence
@@ -93,17 +102,15 @@ order_flow:
     range: [1.5, 3.5]
     rationale: how anomalous the absorbed volume must be to count
   absorption_price_stall_ticks:
-    default: 3              # max price travel that still qualifies as absorption
-    range: [1, 6]
+    default: 32             # max bar range (ticks) that still counts as a stall
+    range: [16, 48]
     rationale: >
-      heavy volume + minimal travel = passive defense of a level. MEASURED
-      2026-07-12 (docs/phase2_interim_report.md): on 1-MINUTE MNQ bars this
-      definition fires ZERO events at ANY threshold (median 1-min range is
-      ~91 ticks in the 2026 vol regime; |delta| and range are inherently
-      correlated at minute granularity, so a relative-range variant also
-      failed). These params are only meaningful at the per-price FOOTPRINT
-      level -- the detector must be rebuilt on FootprintCells (per-price
-      bid/ask ladders), not on bars. Until then FADE runs on CVD divergence.
+      heavy one-sided delta + price stalls. CALIBRATED 2026-07-12 on 800-trade
+      bars (~p25 of bar range): z=2.0/stall=32 fired 16 events on 2026-07-08
+      including the exact session-low bar (11:25, the hand-labeled turning
+      point). On 1-MIN bars this feature is unmeasurable at any threshold
+      (see docs/phase2_interim_report.md) -- these values assume bar_trades
+      bars. In-sample calibration on labeled days; validate OOS in Phase 7.
 
   # --- Exhaustion (climactic initiative that fails to extend) ---
   exhaustion_climax_z:
@@ -112,6 +119,13 @@ order_flow:
     rationale: identifies blow-off before failure
 
   # --- Footprint imbalances (aggressive initiative) ---
+  imbalance_min_volume:
+    default: 20             # min aggressor volume for a level to count as imbalanced
+    range: [5, 100]
+    rationale: >
+      sparse 1-lot levels vs an empty diagonal produce infinite ratios; without
+      a volume floor ~45% of 800t bars showed "stacked imbalances" (measured
+      2026-07-12) -- pure noise. Standard footprint practice.
   imbalance_ratio:
     default: 3.0            # diagonal bid vs ask ratio for a single imbalance
     range: [2.0, 5.0]
